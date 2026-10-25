@@ -1,0 +1,176 @@
+<!DOCTYPE html>
+<html lang="de">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>RISIKO 3D — WebGL Grandmaster Edition</title>
+    <link rel="stylesheet" href="/src/style.css" />
+  </head>
+  <body>
+    <div id="app">
+      <!-- 3D WebGL Canvas Container -->
+      <div id="canvas-container"></div>
+      <!-- Crisp 2D Projected Labels & Floating Popups -->
+      <div id="label-overlay"></div>
+
+      <!-- Top Bar: Players & Phase Status -->
+      <header id="top-hud">
+        <div class="brand-block">
+          <div class="brand-title">RISIKO <span>3D</span></div>
+          <div class="brand-sub">Grandmaster WebGL Edition</div>
+        </div>
+
+        <div id="players-bar"></div>
+
+        <div class="top-controls">
+          <div class="speed-group" title="Animationsgeschwindigkeit">
+            <span>Tempo:</span>
+            <button class="speed-btn active" data-speed="1">1x</button>
+            <button class="speed-btn" data-speed="2">2x</button>
+            <button class="speed-btn" data-speed="4">4x</button>
+          </div>
+          <button id="btn-mode-badge" class="hud-btn mode-pill" title="Aktueller Spielmodus (Klicken zum Ändern)">🌍 Weltherrschaft</button>
+          <button id="btn-sound-toggle" class="hud-btn" title="Sound Effekte An/Aus">🔊 Ton An</button>
+          <button id="btn-ranking-toggle" class="hud-btn" title="Mission & Score-Ranking ein-/ausblenden">🏆 Mission & Ranking</button>
+          <button id="btn-continents-info" class="hud-btn">🌍 Kontinente</button>
+          <button id="btn-new-game" class="hud-btn primary">⚙️ Neues Spiel</button>
+        </div>
+      </header>
+
+      <!-- Right Sidebar: Active Objective / Secret Mission & Live Score Ranking -->
+      <aside id="right-sidebar">
+        <div id="objective-panel" class="glass-panel">
+          <div class="panel-header-row">
+            <h3 id="objective-panel-title">🎯 Spielziel</h3>
+            <div style="display:flex;align-items:center;gap:6px">
+              <button id="btn-toggle-secret" class="mini-icon-btn hidden" title="Geheime Mission ein-/ausblenden">👁️</button>
+              <span id="objective-badge" class="badge">0%</span>
+            </div>
+          </div>
+          <div id="objective-body"></div>
+        </div>
+
+        <div id="ranking-panel" class="glass-panel">
+          <div class="panel-header-row">
+            <h3>🏆 Live Score-Ranking</h3>
+            <span id="ranking-round-badge" class="badge">Runde 1</span>
+          </div>
+          <div id="power-balance-bar" title="Globale Machtverteilung"></div>
+          <div id="ranking-list"></div>
+        </div>
+      </aside>
+
+      <!-- Left Sidebar: Continent Bonuses & Battle Log -->
+      <aside id="left-sidebar">
+        <div id="continent-panel" class="glass-panel">
+          <h3>🌍 Kontinent-Boni</h3>
+          <div id="continent-list"></div>
+        </div>
+
+        <div id="cards-panel" class="glass-panel">
+          <div class="panel-header-row">
+            <h3>🃏 Deine Risiko-Karten</h3>
+            <span id="next-trade-bonus" class="badge">Nächster Tausch: +4</span>
+          </div>
+          <div id="player-cards-list"></div>
+          <button id="btn-trade-cards" class="action-btn gold hidden">
+            ✨ 3 Karten eintauschen!
+          </button>
+        </div>
+
+        <div id="log-panel" class="glass-panel">
+          <h3>📜 Gefechtsprotokoll</h3>
+          <div id="log-list"></div>
+        </div>
+      </aside>
+
+      <!-- Bottom Tactical Command Bar -->
+      <footer id="bottom-command">
+        <div id="phase-stepper">
+          <div class="phase-step" data-phase="REINFORCE">1. Verstärken</div>
+          <div class="phase-step" data-phase="ATTACK">2. Angreifen</div>
+          <div class="phase-step" data-phase="FORTIFY">3. Verschieben</div>
+        </div>
+
+        <div id="command-content"></div>
+
+        <div id="phase-actions">
+          <button id="btn-next-phase" class="action-btn primary">
+            Nächste Phase ➔
+          </button>
+        </div>
+      </footer>
+
+      <!-- New Game Setup Modal -->
+      <div id="modal-new-game" class="modal-backdrop hidden">
+        <div class="modal-card glass-panel">
+          <h2>⚙️ Neues Gefecht & Spielmodus</h2>
+          <p>
+            Wähle deinen bevorzugten <strong>Risiko-Spielmodus</strong> und die Anzahl der Kommandanten.
+            Die Großmeister-KI passt ihre Strategie dynamisch an Missionen, Hauptstädte und Rundenlimits an.
+          </p>
+
+          <div class="form-group">
+            <label>Spielmodus wählen:</label>
+            <div class="mode-grid" id="opt-game-mode">
+              <button class="mode-card-btn active" data-mode="WORLD_DOMINATION">
+                <span class="mode-card-icon">🌍</span>
+                <div class="mode-card-text">
+                  <strong>Weltherrschaft</strong>
+                  <span>Klassisch: Alle 42 Gebiete erobern</span>
+                </div>
+              </button>
+              <button class="mode-card-btn" data-mode="SECRET_MISSIONS">
+                <span class="mode-card-icon">🕵️</span>
+                <div class="mode-card-text">
+                  <strong>Geheime Missionen</strong>
+                  <span>Verdeckte Aufträge (Kontinente, 18×2+, Kopfgeld)</span>
+                </div>
+              </button>
+              <button class="mode-card-btn" data-mode="CAPITALS">
+                <span class="mode-card-icon">🏛️</span>
+                <div class="mode-card-text">
+                  <strong>Hauptstädte (Capital Risk)</strong>
+                  <span>Halte alle Hauptstädte (+2 Bonus/Runde)</span>
+                </div>
+              </button>
+              <button class="mode-card-btn" data-mode="DOMINATION_70">
+                <span class="mode-card-icon">⚡</span>
+                <div class="mode-card-text">
+                  <strong>70% Dominanz</strong>
+                  <span>Schnellspiel: 30 von 42 Gebieten halten</span>
+                </div>
+              </button>
+              <button class="mode-card-btn" data-mode="TURN_LIMIT">
+                <span class="mode-card-icon">⏱️</span>
+                <div class="mode-card-text">
+                  <strong>Runden-Blitz (12 Runden)</strong>
+                  <span>Höchster Kampagnen-Score nach 12 Runden</span>
+                </div>
+              </button>
+            </div>
+            <div id="mode-rules-preview" class="mode-rules-box">
+              Klassisches Risiko: Das Spiel endet erst, wenn ein einziger Kommandant alle 42 Gebiete auf der Weltkarte kontrolliert.
+            </div>
+          </div>
+
+          <div class="form-group">
+            <label>Gesamtspieler (2 bis 4):</label>
+            <div class="option-row" id="opt-total-players">
+              <button class="opt-btn" data-val="2">2 Spieler (Duell)</button>
+              <button class="opt-btn" data-val="3">3 Spieler</button>
+              <button class="opt-btn active" data-val="4">4 Spieler (Standard)</button>
+            </div>
+          </div>
+          <div class="modal-actions">
+            <button id="btn-cancel-modal" class="hud-btn">Abbrechen</button>
+            <button id="btn-start-match" class="action-btn primary">
+              🚀 Schlacht beginnen
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
