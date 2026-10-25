@@ -7,7 +7,7 @@ Eine interaktive, moderne 3D-WebGL-Adaption des strategischen rundenbasierten Br
 ![Vite](https://img.shields.io/badge/Vite-5.4-646CFF?style=for-the-badge&logo=vite)
 ![License](https://img.shields.io/badge/License-MIT-success?style=for-the-badge)
 
----
+----
 
 ## 🌟 Features
 
