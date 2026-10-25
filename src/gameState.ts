@@ -31,7 +31,7 @@ export const GAME_MODES: Record<GameMode, GameModeDef> = {
     icon: '🌍',
     tagline: 'Erobere alle 42 Gebiete der Erde und eliminiere jeden Gegner.',
     rules:
-      'Klassisches Risiko: Das Spiel endet erst, wenn ein einziger Kommandant alle 42 Gebiete auf der Weltkarte kontrolliert.',
+      'Klassische Weltherrschaft: Das Spiel endet erst, wenn ein einziger Kommandant alle 42 Gebiete auf der Weltkarte kontrolliert.',
   },
   SECRET_MISSIONS: {
     id: 'SECRET_MISSIONS',
@@ -550,7 +550,7 @@ export class GameState {
    * - 15 pts per active troop on the map
    * - 160 pts per continent bonus point held
    * - 250 pts per Capital held (in CAPITALS mode)
-   * - 25 pts per Risiko card in hand
+   * - 25 pts per tactic card in hand
    * - 30 pts per territory conquered during the match
    * - 300 pts per opponent eliminated
    */
@@ -1014,7 +1014,7 @@ export class GameState {
 
     this.reinforcementsRemaining += bonus;
     this.addLog(
-      `${player.name} tauscht 3 Risiko-Karten für +${bonus} Armeen ein!${territoryBonusMsg}`
+      `${player.name} tauscht 3 Taktik-Karten für +${bonus} Armeen ein!${territoryBonusMsg}`
     );
     return bonus;
   }

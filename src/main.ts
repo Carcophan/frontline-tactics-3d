@@ -15,7 +15,7 @@ import { CONTINENTS, ContinentId, TERRITORIES, TERRITORY_MAP } from './mapData';
 import { Scene3D } from './scene3d';
 import { sound } from './sound';
 
-class RisikoApp {
+class FrontlineTacticsApp {
   private state: GameState;
   private scene3d: Scene3D;
 
@@ -1307,4 +1307,4 @@ class RisikoApp {
   }
 }
 
-new RisikoApp();
+new FrontlineTacticsApp();

@@ -492,7 +492,7 @@ export class GrandmasterAI {
           strategicScore += 28;
           minWinProb = Math.min(minWinProb, 0.60);
           if (reason === 'Taktischer Vorstoß') {
-            reason = 'Eroberung für Risiko-Karte';
+            reason = 'Eroberung für Taktik-Karte';
           }
         } else {
           // Already got a card this turn: don't overextend unless the attack is strong or strategic

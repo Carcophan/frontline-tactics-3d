@@ -1,5 +1,5 @@
 /**
- * Procedural Web Audio API Sound Engine for RISIKO 3D
+ * Procedural Web Audio API Sound Engine for Frontline Tactics 3D
  * Generates tactical UI sounds, dice rolls, artillery fire, explosions,
  * troop marches, card trade chimes, and capture/victory fanfares without external assets.
  */
