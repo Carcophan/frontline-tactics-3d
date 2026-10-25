@@ -1,3 +1,7 @@
+import { generateRandomWorldMap } from './randomMapGenerator';
+
+export type MapType = 'CLASSIC' | 'RANDOM';
+
 export type ContinentId =
   | 'north_america'
   | 'south_america'
@@ -23,7 +27,7 @@ export interface TerritoryDef {
   neighbors: string[];
 }
 
-export const CONTINENTS: Record<ContinentId, ContinentDef> = {
+export const CLASSIC_CONTINENTS: Record<ContinentId, ContinentDef> = {
   north_america: {
     id: 'north_america',
     name: 'Nordamerika',
@@ -60,6 +64,15 @@ export const CONTINENTS: Record<ContinentId, ContinentDef> = {
     bonus: 2,
     baseColor: 0x9b5bc9,
   },
+};
+
+export const CONTINENTS: Record<ContinentId, ContinentDef> = {
+  north_america: { ...CLASSIC_CONTINENTS.north_america },
+  south_america: { ...CLASSIC_CONTINENTS.south_america },
+  europe: { ...CLASSIC_CONTINENTS.europe },
+  africa: { ...CLASSIC_CONTINENTS.africa },
+  asia: { ...CLASSIC_CONTINENTS.asia },
+  australia: { ...CLASSIC_CONTINENTS.australia },
 };
 
 /**
@@ -134,7 +147,7 @@ export function offsetPolygon(
  * Maritime / Strait crossings where a dotted sea-lane line should be drawn.
  * Contiguous land borders touch directly and do not need sea-lane lines.
  */
-const SEA_CROSSING_KEYS = new Set<string>([
+const CLASSIC_SEA_CROSSING_KEYS = [
   'alaska--kamchatka',
   'greenland--nw_territory',
   'greenland--ontario',
@@ -161,14 +174,22 @@ const SEA_CROSSING_KEYS = new Set<string>([
   'indonesia--western_australia',
   'new_guinea--western_australia',
   'eastern_australia--new_guinea',
-]);
+];
+
+const SEA_CROSSING_KEYS = new Set<string>(CLASSIC_SEA_CROSSING_KEYS);
+const WRAP_CROSSING_KEYS = new Set<string>(['alaska--kamchatka']);
 
 export function isMaritimeConnection(idA: string, idB: string): boolean {
   const key = [idA, idB].sort().join('--');
   return SEA_CROSSING_KEYS.has(key);
 }
 
-export const TERRITORIES: TerritoryDef[] = [
+export function isWrapAroundConnection(idA: string, idB: string): boolean {
+  const key = [idA, idB].sort().join('--');
+  return WRAP_CROSSING_KEYS.has(key);
+}
+
+export const CLASSIC_TERRITORIES: TerritoryDef[] = [
   // =========================================================================
   // NORTH AMERICA (9 Territories)
   // Geographically accurate silhouettes: Alaska Peninsula, Mackenzie/Arctic
@@ -1198,6 +1219,78 @@ export const TERRITORIES: TerritoryDef[] = [
   },
 ];
 
+export const TERRITORIES: TerritoryDef[] = [...CLASSIC_TERRITORIES];
+
 export const TERRITORY_MAP: Record<string, TerritoryDef> = Object.fromEntries(
   TERRITORIES.map((t) => [t.id, t])
 );
+
+export let mapVersion = 1;
+export let currentMapType: MapType = 'CLASSIC';
+export let currentWorldName = 'Klassische Erde';
+export let currentMapSeed: number | null = null;
+
+function syncTerritoryMapInPlace(): void {
+  for (const key of Object.keys(TERRITORY_MAP)) {
+    delete TERRITORY_MAP[key];
+  }
+  for (const t of TERRITORIES) {
+    TERRITORY_MAP[t.id] = t;
+  }
+}
+
+export function applyClassicMap(): void {
+  currentMapType = 'CLASSIC';
+  currentWorldName = 'Klassische Erde';
+  currentMapSeed = null;
+
+  for (const cId of Object.keys(CLASSIC_CONTINENTS) as ContinentId[]) {
+    CONTINENTS[cId] = { ...CLASSIC_CONTINENTS[cId] };
+  }
+
+  TERRITORIES.length = 0;
+  TERRITORIES.push(...CLASSIC_TERRITORIES);
+  syncTerritoryMapInPlace();
+
+  SEA_CROSSING_KEYS.clear();
+  for (const k of CLASSIC_SEA_CROSSING_KEYS) {
+    SEA_CROSSING_KEYS.add(k);
+  }
+
+  WRAP_CROSSING_KEYS.clear();
+  WRAP_CROSSING_KEYS.add('alaska--kamchatka');
+
+  mapVersion++;
+}
+
+export function applyRandomMap(seed?: number): {
+  worldName: string;
+  seed: number;
+} {
+  const generated = generateRandomWorldMap(seed);
+  currentMapType = 'RANDOM';
+  currentWorldName = generated.worldName;
+  currentMapSeed = generated.seed;
+
+  for (const cId of Object.keys(generated.continents) as ContinentId[]) {
+    CONTINENTS[cId] = { ...generated.continents[cId] };
+  }
+
+  TERRITORIES.length = 0;
+  TERRITORIES.push(...generated.territories);
+  syncTerritoryMapInPlace();
+
+  SEA_CROSSING_KEYS.clear();
+  for (const k of generated.seaCrossingKeys) {
+    SEA_CROSSING_KEYS.add(k);
+  }
+
+  WRAP_CROSSING_KEYS.clear();
+  for (const k of generated.wrapCrossingKeys) {
+    WRAP_CROSSING_KEYS.add(k);
+  }
+
+  mapVersion++;
+  return { worldName: generated.worldName, seed: generated.seed };
+}
+

@@ -11,7 +11,18 @@ import {
   GameState,
   getCardTradeBonus,
 } from './gameState';
-import { CONTINENTS, ContinentId, TERRITORIES, TERRITORY_MAP } from './mapData';
+import {
+  applyClassicMap,
+  applyRandomMap,
+  CONTINENTS,
+  ContinentId,
+  currentMapSeed,
+  currentMapType,
+  currentWorldName,
+  MapType,
+  TERRITORIES,
+  TERRITORY_MAP,
+} from './mapData';
 import { Scene3D } from './scene3d';
 import { sound } from './sound';
 
@@ -27,11 +38,14 @@ class FrontlineTacticsApp {
   private aiStatusText = '';
   private configuredTotalPlayers = 4;
   private configuredGameMode: GameMode = 'WORLD_DOMINATION';
+  private configuredMapType: MapType = 'CLASSIC';
   private secretMissionHidden = false;
 
   // DOM Elements
   private playersBarEl = document.getElementById('players-bar')!;
   private modeBadgeBtnEl = document.getElementById('btn-mode-badge')!;
+  private randomMapBtnEl = document.getElementById('btn-random-map')!;
+  private worldNameBadgeEl = document.getElementById('world-name-badge')!;
   private objectivePanelTitleEl = document.getElementById(
     'objective-panel-title'
   )!;
@@ -144,6 +158,26 @@ class FrontlineTacticsApp {
       this.checkAndRunAITurn();
     });
 
+    // Quick one-click Random Map generator button in Top HUD
+    this.randomMapBtnEl?.addEventListener('click', () => {
+      sound.playPhaseChange();
+      this.configuredMapType = 'RANDOM';
+      document
+        .querySelectorAll('#opt-map-type .mode-card-btn')
+        .forEach((b) =>
+          b.classList.toggle(
+            'active',
+            (b as HTMLElement).dataset.map === 'RANDOM'
+          )
+        );
+      this.startNewMatch(
+        this.configuredTotalPlayers,
+        this.configuredGameMode,
+        'RANDOM',
+        true
+      );
+    });
+
     // New game modal
     const modal = document.getElementById('modal-new-game')!;
     const openModal = () => {
@@ -175,6 +209,19 @@ class FrontlineTacticsApp {
       });
     });
 
+    // World map selector in modal (Classic Earth vs. Random Fictional World)
+    document.querySelectorAll('#opt-map-type .mode-card-btn').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        sound.playClick(1.05);
+        document
+          .querySelectorAll('#opt-map-type .mode-card-btn')
+          .forEach((b) => b.classList.remove('active'));
+        btn.classList.add('active');
+        this.configuredMapType = ((btn as HTMLElement).dataset.map ||
+          'CLASSIC') as MapType;
+      });
+    });
+
     document.querySelectorAll('#opt-total-players .opt-btn').forEach((btn) => {
       btn.addEventListener('click', () => {
         sound.playClick(1.05);
@@ -195,12 +242,19 @@ class FrontlineTacticsApp {
         modal.classList.add('hidden');
         this.startNewMatch(
           this.configuredTotalPlayers,
-          this.configuredGameMode
+          this.configuredGameMode,
+          this.configuredMapType,
+          true
         );
       });
   }
 
-  private startNewMatch(totalPlayers: number, gameMode: GameMode): void {
+  private startNewMatch(
+    totalPlayers: number,
+    gameMode: GameMode,
+    mapType: MapType = this.configuredMapType,
+    regenerateIfRandom = true
+  ): void {
     this.isBusyAnimating = false;
     this.selectedFromId = null;
     this.selectedToId = null;
@@ -208,12 +262,36 @@ class FrontlineTacticsApp {
     this.secretMissionHidden = false;
     this.scene3d.showBattleArrow(null, null);
     this.scene3d.clearActiveDice();
+
+    const mapChanged =
+      mapType !== currentMapType || (mapType === 'RANDOM' && regenerateIfRandom);
+    if (mapChanged) {
+      if (mapType === 'RANDOM') {
+        applyRandomMap();
+      } else {
+        applyClassicMap();
+      }
+      this.scene3d.rebuildMap();
+      this.renderContinentReference();
+    }
+
     this.state.initNewGame(totalPlayers, 1, gameMode);
     this.refreshAll();
   }
 
   private renderContinentReference(): void {
     this.continentListEl.innerHTML = '';
+    if (this.worldNameBadgeEl) {
+      this.worldNameBadgeEl.textContent =
+        currentMapType === 'RANDOM'
+          ? `🎲 ${currentWorldName} (#${currentMapSeed})`
+          : '🌍 Klassische Erde';
+    }
+    if (this.randomMapBtnEl) {
+      this.randomMapBtnEl.textContent =
+        currentMapType === 'RANDOM' ? '🎲 Neue Zufallskarte' : '🎲 Zufallskarte';
+    }
+
     for (const cId of Object.keys(CONTINENTS) as ContinentId[]) {
       const c = CONTINENTS[cId];
       const count = TERRITORIES.filter((t) => t.continent === cId).length;
@@ -551,11 +629,18 @@ class FrontlineTacticsApp {
       return;
     }
 
-    // 1. Check card trade
-    if (GrandmasterAI.shouldTradeCards(this.state, ai.id)) {
-      this.state.tradeCards(ai.id);
+    // 1. Check card trade (loop in case AI holds >= 6 cards after eliminating an opponent!)
+    while (GrandmasterAI.shouldTradeCards(this.state, ai.id)) {
+      const traded = this.state.tradeCards(ai.id);
+      if (traded <= 0) break;
       sound.playCardTrade();
       this.refreshAll();
+      if (this.state.evaluateModeVictory(ai.id)) {
+        sound.playVictory();
+        this.isBusyAnimating = false;
+        this.refreshAll();
+        return;
+      }
     }
 
     // 2. Plan and animate reinforcement placements
@@ -563,6 +648,13 @@ class FrontlineTacticsApp {
     let idx = 0;
 
     const placeNext = () => {
+      if ((this.state.phase as string) === 'GAME_OVER') {
+        sound.playVictory();
+        this.isBusyAnimating = false;
+        this.refreshAll();
+        return;
+      }
+
       if (idx >= actions.length || this.state.reinforcementsRemaining <= 0) {
         this.state.phase = 'ATTACK';
         this.refreshAll();
@@ -588,6 +680,13 @@ class FrontlineTacticsApp {
       );
       this.selectedFromId = act.territoryId;
       this.refreshAll();
+
+      if ((this.state.phase as string) === 'GAME_OVER') {
+        sound.playVictory();
+        this.isBusyAnimating = false;
+        this.refreshAll();
+        return;
+      }
 
       window.setTimeout(
         placeNext,
@@ -727,11 +826,7 @@ class FrontlineTacticsApp {
         }
 
         // Defender still alive: check if AI should continue pressing this attack
-        const updatedWinProb = getConquestProbability(
-          fromState.troops,
-          toState.troops
-        );
-        if (fromState.troops >= 2 && updatedWinProb >= 0.48) {
+        if (GrandmasterAI.shouldContinueAttack(this.state, fromId, toId)) {
           this.refreshAll();
           this.executeSingleAICombatWave(fromId, toId);
         } else {
@@ -787,6 +882,9 @@ class FrontlineTacticsApp {
     this.selectedToId = null;
     this.lastDiceRoll = null;
     this.state.endTurn();
+    if (this.state.phase === 'GAME_OVER') {
+      sound.playVictory();
+    }
     this.isBusyAnimating = false;
     this.refreshAll();
     this.checkAndRunAITurn();

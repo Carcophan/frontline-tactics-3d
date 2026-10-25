@@ -5,6 +5,7 @@ import { GameState } from './gameState';
 import {
   CONTINENTS,
   isMaritimeConnection,
+  isWrapAroundConnection,
   offsetPolygon,
   TERRITORIES,
   TERRITORY_MAP,
@@ -81,6 +82,7 @@ export class Scene3D {
   private mouse = new THREE.Vector2();
 
   private oceanMesh!: THREE.Mesh;
+  private mapRootGroup = new THREE.Group();
   private territoryMeshes: Record<string, TerritoryMeshData> = {};
   private labelElements: Record<
     string,
@@ -157,6 +159,7 @@ export class Scene3D {
 
     this.battleArrowGroup = new THREE.Group();
     this.scene.add(this.battleArrowGroup);
+    this.scene.add(this.mapRootGroup);
 
     this.setupLights();
     this.buildBoardAndOcean();
@@ -165,6 +168,44 @@ export class Scene3D {
     this.setupEvents();
 
     this.animate();
+  }
+
+  /**
+   * Rebuilds all 3D territory plateaus, shelves, maritime bridges, and HTML labels
+   * when switching between the Classic World Map and a newly generated Random Map.
+   */
+  public rebuildMap(): void {
+    this.showBattleArrow(null, null);
+    this.clearActiveDice();
+
+    // Dispose geometries and materials in mapRootGroup
+    this.mapRootGroup.traverse((obj) => {
+      const mesh = obj as THREE.Mesh;
+      if (mesh.geometry) {
+        mesh.geometry.dispose();
+      }
+      if (mesh.material) {
+        if (Array.isArray(mesh.material)) {
+          mesh.material.forEach((m) => m.dispose());
+        } else {
+          mesh.material.dispose();
+        }
+      }
+    });
+    this.mapRootGroup.clear();
+
+    // Remove old territory HTML labels
+    for (const lbl of Object.values(this.labelElements)) {
+      lbl.root.remove();
+    }
+    this.labelElements = {};
+    this.territoryMeshes = {};
+    this.hoveredTerritoryId = null;
+    this.selectedTerritoryId = null;
+    this.highlightedTargets.clear();
+
+    this.buildTerritories();
+    this.buildConnectionBridges();
   }
 
   private setupLights(): void {
@@ -273,7 +314,7 @@ export class Scene3D {
     };
 
     const shelfGroup = new THREE.Group();
-    this.scene.add(shelfGroup);
+    this.mapRootGroup.add(shelfGroup);
 
     const polyToShape = (pts: [number, number][]): THREE.Shape => {
       const s = new THREE.Shape();
@@ -376,7 +417,7 @@ export class Scene3D {
       group.add(mesh);
       group.add(ringMesh);
       group.add(armyGroup);
-      this.scene.add(group);
+      this.mapRootGroup.add(group);
 
       this.territoryMeshes[tDef.id] = {
         id: tDef.id,
@@ -468,16 +509,33 @@ export class Scene3D {
         if (!isMaritimeConnection(tDef.id, nId)) continue;
 
         const nDef = TERRITORY_MAP[nId];
-        // Special case: Alaska <-> Kamchatka wraps across the Bering Strait at the Pacific edge
-        if (pairKey === 'alaska--kamchatka') {
+        // East-West wrap-around sea crossing (e.g. Alaska <-> Kamchatka or random map Pacific edge)
+        if (isWrapAroundConnection(tDef.id, nId)) {
+          const westDef = tDef.center[0] < nDef.center[0] ? tDef : nDef;
+          const eastDef = tDef.center[0] < nDef.center[0] ? nDef : tDef;
+
+          let westPt = westDef.center;
+          for (const p of westDef.polygon) {
+            if (p[0] < westPt[0]) westPt = p;
+          }
+          let eastPt = eastDef.center;
+          for (const p of eastDef.polygon) {
+            if (p[0] > eastPt[0]) eastPt = p;
+          }
+
           this.createWrapEdgeLine(
-            new THREE.Vector3(-46.2, 0.65, -16.4),
-            new THREE.Vector3(-48.5, 0.65, -16.4)
+            new THREE.Vector3(westPt[0], 0.65, westPt[1]),
+            new THREE.Vector3(-48.5, 0.65, westPt[1])
           );
           this.createWrapEdgeLine(
-            new THREE.Vector3(45.2, 0.65, -16.2),
-            new THREE.Vector3(48.5, 0.65, -16.2)
+            new THREE.Vector3(eastPt[0], 0.65, eastPt[1]),
+            new THREE.Vector3(48.5, 0.65, eastPt[1])
           );
+          const portW = new THREE.Mesh(portGeo, portMat);
+          portW.position.set(westPt[0], 1.56, westPt[1]);
+          const portE = new THREE.Mesh(portGeo, portMat);
+          portE.position.set(eastPt[0], 1.56, eastPt[1]);
+          this.mapRootGroup.add(portW, portE);
           continue;
         }
 
@@ -509,14 +567,14 @@ export class Scene3D {
         const geo = new THREE.BufferGeometry().setFromPoints(points);
         const line = new THREE.Line(geo, lineMat);
         line.computeLineDistances();
-        this.scene.add(line);
+        this.mapRootGroup.add(line);
 
         // Add subtle coastal port markers at both ends of the sea lane
         const port1 = new THREE.Mesh(portGeo, portMat);
         port1.position.set(bestA[0], 1.56, bestA[1]);
         const port2 = new THREE.Mesh(portGeo, portMat);
         port2.position.set(bestB[0], 1.56, bestB[1]);
-        this.scene.add(port1, port2);
+        this.mapRootGroup.add(port1, port2);
       }
     }
   }
@@ -530,7 +588,7 @@ export class Scene3D {
     const geo = new THREE.BufferGeometry().setFromPoints([p1, p2]);
     const line = new THREE.Line(geo, mat);
     line.computeLineDistances();
-    this.scene.add(line);
+    this.mapRootGroup.add(line);
   }
 
   /**
@@ -751,7 +809,7 @@ export class Scene3D {
     const p1 = new THREE.Vector3(fromCenter[0], 2.2, fromCenter[1]);
     const p2 = new THREE.Vector3(toCenter[0], 2.2, toCenter[1]);
     const mid = p1.clone().add(p2).multiplyScalar(0.5);
-    mid.y = 6.5;
+    mid.y = p1.distanceTo(p2) > 40 ? 12.0 : 6.5;
 
     const curve = new THREE.QuadraticBezierCurve3(p1, mid, p2);
     const tubeGeo = new THREE.TubeGeometry(curve, 24, 0.22, 8, false);

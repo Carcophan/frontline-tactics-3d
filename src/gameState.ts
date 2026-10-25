@@ -1,6 +1,9 @@
 import {
   CONTINENTS,
   ContinentId,
+  currentMapSeed,
+  currentMapType,
+  currentWorldName,
   TERRITORIES,
   TERRITORY_MAP,
 } from './mapData';
@@ -312,7 +315,13 @@ export class GameState {
     this.logs = [];
 
     const modeDef = GAME_MODES[this.gameMode];
-    this.addLog(`${modeDef.icon} Spielmodus: ${modeDef.name} gestartet.`);
+    const mapLabel =
+      currentMapType === 'RANDOM'
+        ? `🎲 Zufallskarte "${currentWorldName}" (#${currentMapSeed})`
+        : '🌍 Klassische Erde';
+    this.addLog(
+      `${modeDef.icon} Spielmodus: ${modeDef.name} auf ${mapLabel} gestartet.`
+    );
     if (this.gameMode === 'CAPITALS') {
       const capSummaries = this.players
         .map(
@@ -359,51 +368,54 @@ export class GameState {
   }
 
   private assignSecretMissions(): void {
+    const na = CONTINENTS.north_america.name;
+    const sa = CONTINENTS.south_america.name;
+    const eu = CONTINENTS.europe.name;
+    const af = CONTINENTS.africa.name;
+    const as = CONTINENTS.asia.name;
+    const au = CONTINENTS.australia.name;
+
     const baseMissions: SecretMission[] = [
       {
         id: 'mission_na_af',
-        title: 'Atlantik-Pakt',
-        description: 'Erobere die Kontinente Nordamerika und Afrika vollständig.',
+        title: `Pakt: ${na} & ${af}`,
+        description: `Erobere die Kontinente ${na} und ${af} vollständig.`,
         type: 'CONTINENTS',
         requiredContinents: ['north_america', 'africa'],
       },
       {
         id: 'mission_na_au',
-        title: 'Pazifik-Dominanz',
-        description:
-          'Erobere die Kontinente Nordamerika und Australien vollständig.',
+        title: `Dominanz: ${na} & ${au}`,
+        description: `Erobere die Kontinente ${na} und ${au} vollständig.`,
         type: 'CONTINENTS',
         requiredContinents: ['north_america', 'australia'],
       },
       {
         id: 'mission_as_sa',
-        title: 'Eurasien-Anden-Achse',
-        description:
-          'Erobere die Kontinente Asien und Südamerika vollständig.',
+        title: `Großachse: ${as} & ${sa}`,
+        description: `Erobere die Kontinente ${as} und ${sa} vollständig.`,
         type: 'CONTINENTS',
         requiredContinents: ['asia', 'south_america'],
       },
       {
         id: 'mission_as_af',
-        title: 'Alte Welt Imperium',
-        description: 'Erobere die Kontinente Asien und Afrika vollständig.',
+        title: `Imperium: ${as} & ${af}`,
+        description: `Erobere die Kontinente ${as} und ${af} vollständig.`,
         type: 'CONTINENTS',
         requiredContinents: ['asia', 'africa'],
       },
       {
         id: 'mission_eu_sa_plus1',
-        title: 'Drei-Kontinente-Koalition I',
-        description:
-          'Erobere Europa, Südamerika und mindestens 1 weiteren Kontinent deiner Wahl.',
+        title: `Drei-Kontinente-Koalition I (${eu} & ${sa} + 1)`,
+        description: `Erobere ${eu}, ${sa} und mindestens 1 weiteren Kontinent deiner Wahl.`,
         type: 'CONTINENTS',
         requiredContinents: ['europe', 'south_america'],
         extraContinentsCount: 1,
       },
       {
         id: 'mission_eu_au_plus1',
-        title: 'Drei-Kontinente-Koalition II',
-        description:
-          'Erobere Europa, Australien und mindestens 1 weiteren Kontinent deiner Wahl.',
+        title: `Drei-Kontinente-Koalition II (${eu} & ${au} + 1)`,
+        description: `Erobere ${eu}, ${au} und mindestens 1 weiteren Kontinent deiner Wahl.`,
         type: 'CONTINENTS',
         requiredContinents: ['europe', 'australia'],
         extraContinentsCount: 1,
@@ -951,11 +963,19 @@ export class GameState {
   }
 
   /**
-   * Finds valid 3-card trade sets for a player.
+   * Finds the tactically optimal valid 3-card trade set for a player.
    * Valid sets: 3 of same symbol, or 1 of each symbol, or any 2 + 1 wild.
+   * Prioritizes sets that include an owned border territory (+2 troop bonus)
+   * and preserves 'wild' (Joker) cards whenever a natural set is available.
    */
-  public findValidCardSet(cards: RiskCard[]): [RiskCard, RiskCard, RiskCard] | null {
+  public findValidCardSet(
+    cards: RiskCard[],
+    playerId: number = this.currentPlayer?.id ?? 0
+  ): [RiskCard, RiskCard, RiskCard] | null {
     if (cards.length < 3) return null;
+    let bestTriplet: [RiskCard, RiskCard, RiskCard] | null = null;
+    let bestScore = -Infinity;
+
     for (let i = 0; i < cards.length; i++) {
       for (let j = i + 1; j < cards.length; j++) {
         for (let k = j + 1; k < cards.length; k++) {
@@ -964,13 +984,35 @@ export class GameState {
             cards[j],
             cards[k],
           ];
-          if (this.isValidCardTriplet(triplet)) {
-            return triplet;
+          if (!this.isValidCardTriplet(triplet)) continue;
+
+          const wildCount = triplet.filter((c) => c.symbol === 'wild').length;
+          // Save wild cards if a natural set exists
+          let score = -wildCount * 120;
+
+          let bestTerritoryMatchBonus = 0;
+          for (const c of triplet) {
+            if (
+              c.territoryId &&
+              this.territories[c.territoryId]?.ownerId === playerId
+            ) {
+              const isBorder = this.isBorderTerritory(c.territoryId);
+              const matchVal = isBorder ? 65 : 30;
+              if (matchVal > bestTerritoryMatchBonus) {
+                bestTerritoryMatchBonus = matchVal;
+              }
+            }
+          }
+          score += bestTerritoryMatchBonus;
+
+          if (score > bestScore) {
+            bestScore = score;
+            bestTriplet = triplet;
           }
         }
       }
     }
-    return null;
+    return bestTriplet;
   }
 
   public isValidCardTriplet(triplet: [RiskCard, RiskCard, RiskCard]): boolean {
@@ -988,7 +1030,7 @@ export class GameState {
 
   public tradeCards(playerId: number, triplet?: [RiskCard, RiskCard, RiskCard]): number {
     const player = this.players[playerId];
-    const set = triplet ?? this.findValidCardSet(player.cards);
+    const set = triplet ?? this.findValidCardSet(player.cards, playerId);
     if (!set || !this.isValidCardTriplet(set)) return 0;
 
     const bonus = getCardTradeBonus(this.cardTradesCompleted);
@@ -999,17 +1041,26 @@ export class GameState {
     player.cards = player.cards.filter((c) => !ids.has(c.id));
     this.discardPile.push(...set);
 
-    // Territory match bonus (+2 troops on owned territory shown on traded card)
+    // Territory match bonus (+2 troops on owned territory shown on traded card, preferring border territories)
     let territoryBonusMsg = '';
-    for (const card of set) {
-      if (
+    const matchingOwnedCards = set.filter(
+      (card) =>
         card.territoryId &&
-        this.territories[card.territoryId].ownerId === playerId
-      ) {
-        this.territories[card.territoryId].troops += 2;
-        territoryBonusMsg = ` (+2 Bonus-Truppen auf ${TERRITORY_MAP[card.territoryId].name})`;
-        break;
-      }
+        this.territories[card.territoryId]?.ownerId === playerId
+    );
+    if (matchingOwnedCards.length > 0) {
+      matchingOwnedCards.sort((a, b) => {
+        const aBorder = this.isBorderTerritory(a.territoryId!) ? 1 : 0;
+        const bBorder = this.isBorderTerritory(b.territoryId!) ? 1 : 0;
+        if (bBorder !== aBorder) return bBorder - aBorder;
+        return (
+          this.territories[b.territoryId!].troops -
+          this.territories[a.territoryId!].troops
+        );
+      });
+      const chosenId = matchingOwnedCards[0].territoryId!;
+      this.territories[chosenId].troops += 2;
+      territoryBonusMsg = ` (+2 Bonus-Truppen auf ${TERRITORY_MAP[chosenId].name})`;
     }
 
     this.reinforcementsRemaining += bonus;

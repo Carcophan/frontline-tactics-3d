@@ -30,6 +30,7 @@
             <button class="speed-btn" data-speed="4">4x</button>
           </div>
           <button id="btn-mode-badge" class="hud-btn mode-pill" title="Aktueller Spielmodus (Klicken zum Ändern)">🌍 Weltherrschaft</button>
+          <button id="btn-random-map" class="hud-btn" title="Sofort eine neue Zufalls-Weltkarte mit fiktiven Ländern generieren">🎲 Zufallskarte</button>
           <button id="btn-sound-toggle" class="hud-btn" title="Sound Effekte An/Aus">🔊 Ton An</button>
           <button id="btn-ranking-toggle" class="hud-btn" title="Mission & Score-Ranking ein-/ausblenden">🏆 Mission & Ranking</button>
           <button id="btn-continents-info" class="hud-btn">🌍 Kontinente</button>
@@ -63,7 +64,10 @@
       <!-- Left Sidebar: Continent Bonuses & Battle Log -->
       <aside id="left-sidebar">
         <div id="continent-panel" class="glass-panel">
-          <h3>🌍 Kontinent-Boni</h3>
+          <div class="panel-header-row">
+            <h3 style="margin-bottom:0">🌍 Kontinent-Boni</h3>
+            <span id="world-name-badge" class="badge">Klassische Erde</span>
+          </div>
           <div id="continent-list"></div>
         </div>
 
@@ -151,6 +155,26 @@
             </div>
             <div id="mode-rules-preview" class="mode-rules-box">
               Klassische Weltherrschaft: Das Spiel endet erst, wenn ein einziger Kommandant alle 42 Gebiete auf der Weltkarte kontrolliert.
+            </div>
+          </div>
+
+          <div class="form-group">
+            <label>Weltkarte wählen:</label>
+            <div class="mode-grid" id="opt-map-type">
+              <button class="mode-card-btn active" data-map="CLASSIC">
+                <span class="mode-card-icon">🌍</span>
+                <div class="mode-card-text">
+                  <strong>Klassische Weltkarte</strong>
+                  <span>Historische Erde (6 Kontinente, 42 Länder)</span>
+                </div>
+              </button>
+              <button class="mode-card-btn" data-map="RANDOM">
+                <span class="mode-card-icon">🎲</span>
+                <div class="mode-card-text">
+                  <strong>Zufalls-Welt (Fiktiv)</strong>
+                  <span>Prozedurale Kontinente & 42 fiktive Länder</span>
+                </div>
+              </button>
             </div>
           </div>
 
