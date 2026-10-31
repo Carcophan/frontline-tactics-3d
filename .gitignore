@@ -32,3 +32,5 @@ dist-ssr
 # Temporary / Cache
 .eslintcache
 *.tsbuildinfo
+.vite.pid
+.server.log

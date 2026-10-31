@@ -92,6 +92,8 @@ Eine interaktive, moderne 3D-WebGL-Adaption des strategischen rundenbasierten Br
 | `npm run dev` | Startet den lokalen Vite-Entwicklungsserver mit Hot Module Replacement (HMR). |
 | `npm run build` | Führt die TypeScript-Typüberprüfung (`tsc`) durch und baut das optimierte Production-Bundle in `/dist`. |
 | `npm run preview` | Startet eine lokale Vorschau des gebauten Production-Bundles. |
+| `./launch.sh` | Desktop-Launcher: Startet den Server (Port 5174) & öffnet das Spiel direkt in Google Chrome (App-Modus). |
+| `./stop-server.sh` | Beendet den laufenden Hintergrund-Server. |
 
 ---
 
