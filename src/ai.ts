@@ -984,6 +984,155 @@ export class GrandmasterAI {
   }
 
   // ==========================================================================
+  // 5B. GRANDMASTER TERRITORY DRAFT (`SETUP_CLAIM`) & INITIAL DEPLOY (`SETUP_DEPLOY`)
+  // ==========================================================================
+
+  /**
+   * Selects the strategically optimal unclaimed territory during the turn-by-turn `SETUP_CLAIM` phase.
+   */
+  public static chooseTerritoryToClaim(
+    state: GameState,
+    playerId: number
+  ): { territoryId: string; reason: string } {
+    ensureTopologyCache();
+    const unclaimed = state.getUnclaimedTerritories();
+    if (unclaimed.length === 0) {
+      return { territoryId: TERRITORIES[0].id, reason: 'Gebietswahl' };
+    }
+
+    const player = state.players[playerId];
+    const isPickingCapital =
+      state.gameMode === 'CAPITALS' && !player?.capitalTerritoryId;
+    const missionConts = new Set<ContinentId>(
+      state.gameMode === 'SECRET_MISSIONS' &&
+      player?.mission?.type === 'CONTINENTS'
+        ? player.mission.requiredContinents ?? []
+        : []
+    );
+
+    let bestId = unclaimed[0].id;
+    let bestScore = -Infinity;
+    let bestReason = 'Strategische Landnahme';
+
+    for (const u of unclaimed) {
+      const tDef = TERRITORY_MAP[u.id];
+      const cId = tDef.continent;
+      const cDef = CONTINENTS[cId];
+      const cTerrIds = CONTINENT_TERRITORIES[cId];
+      const gateways = CONTINENT_GATEWAYS[cId];
+
+      let myInCont = 0;
+      let enemyInCont = 0;
+      const enemyOwners = new Set<number>();
+      let unclaimedInCont = 0;
+
+      for (const tid of cTerrIds) {
+        const owner = state.territories[tid].ownerId;
+        if (owner === -1) {
+          unclaimedInCont++;
+        } else if (owner === playerId) {
+          myInCont++;
+        } else {
+          enemyInCont++;
+          enemyOwners.add(owner);
+        }
+      }
+
+      const chokeCount = Math.max(1, gateways.length);
+      // Base value of the continent (bonus per territory + defensibility)
+      let score =
+        (cDef.bonus / cTerrIds.length) * 38 + (cDef.bonus / chokeCount) * 18;
+      let reason = `Sichert Position in ${cDef.name}`;
+
+      // 1. Secret Mission Target Continent priority
+      if (missionConts.has(cId)) {
+        score += 42;
+        reason = `Missions-Gebiet in ${cDef.name} sichern`;
+      }
+
+      // 2. Completing or building an uncontested continent monopoly
+      if (myInCont > 0 && enemyInCont === 0) {
+        score += 36 + (myInCont / cTerrIds.length) * 55;
+        if (unclaimedInCont === 1) {
+          score += 75;
+          reason = `Vollendet Kontinent ${cDef.name}!`;
+        } else {
+          reason = `Baut Vorherrschaft in ${cDef.name} aus`;
+        }
+      } else if (myInCont > 0) {
+        score += (myInCont / cTerrIds.length) * 28;
+      }
+
+      // 3. Blocking a single rival from claiming an entire continent uncontested!
+      if (
+        myInCont === 0 &&
+        enemyOwners.size === 1 &&
+        enemyInCont >= cTerrIds.length - 2 &&
+        unclaimedInCont <= 2
+      ) {
+        score += 62 + cDef.bonus * 8;
+        reason = `Blockiert feindliches Kontinent-Monopol in ${cDef.name}`;
+      }
+
+      // 4. Connected cluster bonus (adjacent to already-owned territories)
+      let friendlyNeighbors = 0;
+      let enemyNeighbors = 0;
+      for (const nId of tDef.neighbors) {
+        const nOwner = state.territories[nId].ownerId;
+        if (nOwner === playerId) friendlyNeighbors++;
+        else if (nOwner !== -1) enemyNeighbors++;
+      }
+      score += friendlyNeighbors * 16;
+
+      // 5. Gateway / Choke-point value
+      if (gateways.includes(u.id)) {
+        score += 10;
+      }
+
+      // 6. Capital pick preference (strong central/defensible node)
+      if (isPickingCapital) {
+        score += tDef.neighbors.length * 4 - enemyNeighbors * 6;
+        reason = `Errichtet Hauptstadt 🏛️ in ${tDef.name}`;
+      }
+
+      // Small deterministic jitter so AI personalities vary slightly
+      score += Math.random() * 4;
+
+      if (score > bestScore) {
+        bestScore = score;
+        bestId = u.id;
+        bestReason = reason;
+      }
+    }
+
+    return { territoryId: bestId, reason: bestReason };
+  }
+
+  /**
+   * Selects the best owned territory to place 1 starting army during `SETUP_DEPLOY` (reihum).
+   */
+  public static chooseSetupDeployment(
+    state: GameState,
+    playerId: number
+  ): { territoryId: string; reason: string } {
+    const planned = this.planReinforcements(state);
+    if (planned.length > 0) {
+      return {
+        territoryId: planned[0].territoryId,
+        reason: planned[0].reason,
+      };
+    }
+    const owned = state.getPlayerTerritories(playerId);
+    const borders = owned.filter((t) => state.isBorderTerritory(t.id));
+    const pool = borders.length > 0 ? borders : owned;
+    const pick = pool[0] ?? owned[0];
+    return {
+      territoryId: pick.id,
+      reason: 'Grenzsicherung',
+    };
+  }
+
+  // ==========================================================================
   // 6. GRANDMASTER REINFORCEMENT PLANNER
   // ==========================================================================
 

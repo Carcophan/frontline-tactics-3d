@@ -8,7 +8,15 @@ import {
   TERRITORY_MAP,
 } from './mapData';
 
-export type TurnPhase = 'REINFORCE' | 'ATTACK' | 'FORTIFY' | 'GAME_OVER';
+export type TurnPhase =
+  | 'SETUP_CLAIM'
+  | 'SETUP_DEPLOY'
+  | 'REINFORCE'
+  | 'ATTACK'
+  | 'FORTIFY'
+  | 'GAME_OVER';
+
+export type SetupMode = 'CLAIM_TURNS' | 'AUTO_RANDOM';
 
 export type GameMode =
   | 'WORLD_DOMINATION'
@@ -193,10 +201,12 @@ export function getCardTradeBonus(tradeCount: number): number {
 
 export class GameState {
   public gameMode: GameMode = 'WORLD_DOMINATION';
+  public setupMode: SetupMode = 'CLAIM_TURNS';
   public maxTurns = 12;
   public players: Player[] = [];
   public territories: Record<string, TerritoryState> = {};
   public capitalTerritoryIds: Record<number, string> = {}; // originalOwnerId -> territoryId
+  public setupArmiesRemaining: Record<number, number> = {};
   public deck: RiskCard[] = [];
   public discardPile: RiskCard[] = [];
   public cardTradesCompleted = 0;
@@ -214,19 +224,23 @@ export class GameState {
   constructor(
     totalPlayers = 4,
     humanCount = 1,
-    gameMode: GameMode = 'WORLD_DOMINATION'
+    gameMode: GameMode = 'WORLD_DOMINATION',
+    setupMode: SetupMode = 'CLAIM_TURNS'
   ) {
-    this.initNewGame(totalPlayers, humanCount, gameMode);
+    this.initNewGame(totalPlayers, humanCount, gameMode, setupMode);
   }
 
   public initNewGame(
     totalPlayers = 4,
     humanCount = 1,
-    gameMode: GameMode = this.gameMode
+    gameMode: GameMode = this.gameMode,
+    setupMode: SetupMode = this.setupMode
   ): void {
     this.gameMode = gameMode;
+    this.setupMode = setupMode;
     this.maxTurns = 12;
     this.capitalTerritoryIds = {};
+    this.setupArmiesRemaining = {};
     this.victoryReason = '';
 
     const count = Math.min(4, Math.max(2, totalPlayers));
@@ -267,7 +281,62 @@ export class GameState {
     this.discardPile = [];
     this.cardTradesCompleted = 0;
 
-    // Distribute territories evenly & randomly
+    // Starting armies per player according to Risk rules:
+    // 2 players: 40, 3 players: 35, 4 players: 30
+    const startingArmies = count === 2 ? 40 : count === 3 ? 35 : 30;
+
+    this.currentPlayerIndex = 0;
+    this.turnNumber = 1;
+    this.conqueredThisTurn = false;
+    this.pendingConquestMove = null;
+    this.winnerId = null;
+    this.logs = [];
+
+    const modeDef = GAME_MODES[this.gameMode];
+    const mapLabel =
+      currentMapType === 'RANDOM'
+        ? `🎲 Zufallskarte "${currentWorldName}" (#${currentMapSeed})`
+        : '🌍 Klassische Erde';
+
+    if (this.gameMode === 'SECRET_MISSIONS') {
+      this.assignSecretMissions();
+    }
+
+    if (this.setupMode === 'CLAIM_TURNS') {
+      // Initialize all 42 territories as unclaimed (ownerId: -1, troops: 0)
+      this.territories = {};
+      for (const t of TERRITORIES) {
+        this.territories[t.id] = {
+          id: t.id,
+          ownerId: -1,
+          troops: 0,
+        };
+      }
+      for (const p of this.players) {
+        this.setupArmiesRemaining[p.id] = startingArmies;
+      }
+      this.phase = 'SETUP_CLAIM';
+      this.reinforcementsRemaining = this.setupArmiesRemaining[0];
+
+      this.addLog(
+        `${modeDef.icon} Spielmodus: ${modeDef.name} auf ${mapLabel} gestartet.`
+      );
+      this.addLog(
+        `🚩 Start-Variante: Reihum Gebietswahl! Alle Kommandanten wählen abwechselnd ein freies Territorium.`
+      );
+      if (this.gameMode === 'SECRET_MISSIONS') {
+        this.addLog(
+          `🕵️ Jeder Kommandant hat einen streng geheimen Einsatzbefehl erhalten!`
+        );
+      } else if (this.gameMode === 'CAPITALS') {
+        this.addLog(
+          `🏛️ Das jeweils zuerst gewählte Gebiet jedes Kommandanten wird zur befestigten Hauptstadt (+4 Garnison)!`
+        );
+      }
+      return;
+    }
+
+    // AUTO_RANDOM setup: Distribute territories evenly & randomly
     const shuffledTerritories = [...TERRITORIES].sort(
       () => Math.random() - 0.5
     );
@@ -281,10 +350,6 @@ export class GameState {
       };
     });
 
-    // Starting armies per player according to Risk rules:
-    // 2 players: 40, 3 players: 35, 4 players: 30
-    const startingArmies = count === 2 ? 40 : count === 3 ? 35 : 30;
-
     // Distribute remaining starting armies smartly onto border territories
     for (const player of this.players) {
       const owned = this.getPlayerTerritories(player.id);
@@ -297,28 +362,15 @@ export class GameState {
         pick.troops += 1;
         remaining--;
       }
+      this.setupArmiesRemaining[player.id] = 0;
     }
 
     // Mode-specific setup
     if (this.gameMode === 'CAPITALS') {
       this.assignCapitals();
-    } else if (this.gameMode === 'SECRET_MISSIONS') {
-      this.assignSecretMissions();
     }
 
-    this.currentPlayerIndex = 0;
-    this.turnNumber = 1;
     this.phase = 'REINFORCE';
-    this.conqueredThisTurn = false;
-    this.pendingConquestMove = null;
-    this.winnerId = null;
-    this.logs = [];
-
-    const modeDef = GAME_MODES[this.gameMode];
-    const mapLabel =
-      currentMapType === 'RANDOM'
-        ? `🎲 Zufallskarte "${currentWorldName}" (#${currentMapSeed})`
-        : '🌍 Klassische Erde';
     this.addLog(
       `${modeDef.icon} Spielmodus: ${modeDef.name} auf ${mapLabel} gestartet.`
     );
@@ -506,6 +558,10 @@ export class GameState {
     return Object.values(this.territories).filter(
       (t) => t.ownerId === playerId
     );
+  }
+
+  public getUnclaimedTerritories(): TerritoryState[] {
+    return Object.values(this.territories).filter((t) => t.ownerId === -1);
   }
 
   public getPlayerTotalTroops(playerId: number): number {
@@ -806,25 +862,32 @@ export class GameState {
     }
 
     if (this.gameMode === 'CAPITALS') {
-      const capEntries = Object.entries(this.capitalTerritoryIds);
-      const totalCaps = capEntries.length;
+      const totalCaps = this.players.length;
       const myCaps = this.getPlayerControlledCapitals(playerId).length;
-      const isCompleted = totalCaps > 0 && myCaps === totalCaps;
+      const isCompleted =
+        Object.keys(this.capitalTerritoryIds).length === totalCaps &&
+        totalCaps > 0 &&
+        myCaps === totalCaps;
       const pct =
         totalCaps > 0 ? Math.round((myCaps / totalCaps) * 100) : 0;
 
-      const checklist: ObjectiveCheckItem[] = capEntries.map(
-        ([origOwnerId, tId]) => {
-          const currentOwner = this.players[this.territories[tId].ownerId];
-          const origOwner = this.players[Number(origOwnerId)];
-          const troops = this.territories[tId].troops;
+      const checklist: ObjectiveCheckItem[] = this.players.map((origOwner) => {
+        const tId = this.capitalTerritoryIds[origOwner.id];
+        if (!tId || this.territories[tId]?.ownerId === -1) {
           return {
-            label: `🏛️ ${TERRITORY_MAP[tId].name} (${origOwner.name.split(' ')[0]})`,
-            done: currentOwner.id === playerId,
-            detail: `${currentOwner.name.split(' ')[0]} • ${troops} 🪖`,
+            label: `🏛️ Hauptstadt (${origOwner.name.split(' ')[0]})`,
+            done: false,
+            detail: 'Wird gewählt...',
           };
         }
-      );
+        const currentOwner = this.players[this.territories[tId].ownerId];
+        const troops = this.territories[tId].troops;
+        return {
+          label: `🏛️ ${TERRITORY_MAP[tId].name} (${origOwner.name.split(' ')[0]})`,
+          done: currentOwner?.id === playerId,
+          detail: `${currentOwner?.name.split(' ')[0] ?? '-'} • ${troops} 🪖`,
+        };
+      });
 
       return {
         mode: this.gameMode,
@@ -933,10 +996,104 @@ export class GameState {
 
   public isBorderTerritory(territoryId: string): boolean {
     const tState = this.territories[territoryId];
+    if (!tState || tState.ownerId === -1) return false;
     const tDef = TERRITORY_MAP[territoryId];
     return tDef.neighbors.some(
       (nId) => this.territories[nId].ownerId !== tState.ownerId
     );
+  }
+
+  /**
+   * Claims an unoccupied territory for the current player during the turn-by-turn `SETUP_CLAIM` phase.
+   */
+  public claimTerritory(territoryId: string): boolean {
+    if (this.phase !== 'SETUP_CLAIM') return false;
+    const t = this.territories[territoryId];
+    if (!t || t.ownerId !== -1) return false;
+
+    const p = this.currentPlayer;
+    t.ownerId = p.id;
+    t.troops = 1;
+    if ((this.setupArmiesRemaining[p.id] ?? 0) > 0) {
+      this.setupArmiesRemaining[p.id]--;
+    }
+
+    if (this.gameMode === 'CAPITALS' && !p.capitalTerritoryId) {
+      p.capitalTerritoryId = territoryId;
+      this.capitalTerritoryIds[p.id] = territoryId;
+      t.troops += 4;
+      this.addLog(
+        `🏛️ ${p.name} wählt ${TERRITORY_MAP[territoryId].name} als befestigte Hauptstadt (+4 Garnison)!`
+      );
+    } else {
+      const remUnclaimed = this.getUnclaimedTerritories().length;
+      this.addLog(
+        `🚩 ${p.name} besetzt ${TERRITORY_MAP[territoryId].name} (${remUnclaimed} frei).`
+      );
+    }
+
+    this.advanceSetupTurn();
+    return true;
+  }
+
+  /**
+   * Places initial starting army onto an owned territory during `SETUP_DEPLOY` (reihum).
+   */
+  public placeSetupArmy(territoryId: string, count = 1): boolean {
+    if (this.phase !== 'SETUP_DEPLOY') return false;
+    const t = this.territories[territoryId];
+    const p = this.currentPlayer;
+    if (!t || t.ownerId !== p.id) return false;
+
+    const rem = this.setupArmiesRemaining[p.id] ?? 0;
+    const amount = Math.min(count, rem);
+    if (amount <= 0) return false;
+
+    t.troops += amount;
+    this.setupArmiesRemaining[p.id] = rem - amount;
+
+    this.advanceSetupTurn();
+    return true;
+  }
+
+  /**
+   * Advances to the next player in `SETUP_CLAIM` or `SETUP_DEPLOY`, transitioning phases when ready.
+   */
+  public advanceSetupTurn(): void {
+    const count = this.players.length;
+
+    if (this.phase === 'SETUP_CLAIM') {
+      const unclaimed = this.getUnclaimedTerritories();
+      if (unclaimed.length > 0) {
+        this.currentPlayerIndex = (this.currentPlayerIndex + 1) % count;
+        this.reinforcementsRemaining =
+          this.setupArmiesRemaining[this.currentPlayerIndex] ?? 0;
+        return;
+      }
+
+      // All 42 territories claimed -> transition to SETUP_DEPLOY
+      this.phase = 'SETUP_DEPLOY';
+      this.addLog(
+        `✅ Alle 42 Gebiete wurden reihum verteilt! Jetzt werden die restlichen Start-Armeen reihum platziert.`
+      );
+    }
+
+    if (this.phase === 'SETUP_DEPLOY') {
+      for (let step = 1; step <= count; step++) {
+        const nextIdx = (this.currentPlayerIndex + step) % count;
+        if ((this.setupArmiesRemaining[nextIdx] ?? 0) > 0) {
+          this.currentPlayerIndex = nextIdx;
+          this.reinforcementsRemaining = this.setupArmiesRemaining[nextIdx];
+          return;
+        }
+      }
+
+      // All players have placed all their starting armies -> begin Round 1!
+      this.currentPlayerIndex = 0;
+      this.turnNumber = 1;
+      this.addLog(`⚔️ Aufstellung abgeschlossen! Runde 1 beginnt.`);
+      this.startPlayerTurn();
+    }
   }
 
   public startPlayerTurn(): void {

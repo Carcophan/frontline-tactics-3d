@@ -10,6 +10,7 @@ import {
   GameMode,
   GameState,
   getCardTradeBonus,
+  SetupMode,
 } from './gameState';
 import {
   applyClassicMap,
@@ -38,12 +39,14 @@ class FrontlineTacticsApp {
   private aiStatusText = '';
   private configuredTotalPlayers = 4;
   private configuredGameMode: GameMode = 'WORLD_DOMINATION';
+  private configuredSetupMode: SetupMode = 'CLAIM_TURNS';
   private configuredMapType: MapType = 'CLASSIC';
   private secretMissionHidden = false;
 
   // DOM Elements
   private playersBarEl = document.getElementById('players-bar')!;
   private modeBadgeBtnEl = document.getElementById('btn-mode-badge')!;
+  private claimModeBtnEl = document.getElementById('btn-claim-mode')!;
   private randomMapBtnEl = document.getElementById('btn-random-map')!;
   private worldNameBadgeEl = document.getElementById('world-name-badge')!;
   private objectivePanelTitleEl = document.getElementById(
@@ -158,6 +161,27 @@ class FrontlineTacticsApp {
       this.checkAndRunAITurn();
     });
 
+    // Quick one-click Reihum-Gebietswahl start button in Top HUD
+    this.claimModeBtnEl?.addEventListener('click', () => {
+      sound.playPhaseChange();
+      this.configuredSetupMode = 'CLAIM_TURNS';
+      document
+        .querySelectorAll('#opt-setup-mode .mode-card-btn')
+        .forEach((b) =>
+          b.classList.toggle(
+            'active',
+            (b as HTMLElement).dataset.setup === 'CLAIM_TURNS'
+          )
+        );
+      this.startNewMatch(
+        this.configuredTotalPlayers,
+        this.configuredGameMode,
+        this.configuredMapType,
+        false,
+        'CLAIM_TURNS'
+      );
+    });
+
     // Quick one-click Random Map generator button in Top HUD
     this.randomMapBtnEl?.addEventListener('click', () => {
       sound.playPhaseChange();
@@ -174,7 +198,8 @@ class FrontlineTacticsApp {
         this.configuredTotalPlayers,
         this.configuredGameMode,
         'RANDOM',
-        true
+        true,
+        this.configuredSetupMode
       );
     });
 
@@ -208,6 +233,21 @@ class FrontlineTacticsApp {
         rulesPreviewEl.textContent = GAME_MODES[mode].rules;
       });
     });
+
+    // Setup mode selector in modal (CLAIM_TURNS vs AUTO_RANDOM)
+    document
+      .querySelectorAll('#opt-setup-mode .mode-card-btn')
+      .forEach((btn) => {
+        btn.addEventListener('click', () => {
+          sound.playClick(1.05);
+          document
+            .querySelectorAll('#opt-setup-mode .mode-card-btn')
+            .forEach((b) => b.classList.remove('active'));
+          btn.classList.add('active');
+          this.configuredSetupMode = ((btn as HTMLElement).dataset.setup ||
+            'CLAIM_TURNS') as SetupMode;
+        });
+      });
 
     // World map selector in modal (Classic Earth vs. Random Fictional World)
     document.querySelectorAll('#opt-map-type .mode-card-btn').forEach((btn) => {
@@ -244,7 +284,8 @@ class FrontlineTacticsApp {
           this.configuredTotalPlayers,
           this.configuredGameMode,
           this.configuredMapType,
-          true
+          true,
+          this.configuredSetupMode
         );
       });
   }
@@ -253,7 +294,8 @@ class FrontlineTacticsApp {
     totalPlayers: number,
     gameMode: GameMode,
     mapType: MapType = this.configuredMapType,
-    regenerateIfRandom = true
+    regenerateIfRandom = true,
+    setupMode: SetupMode = this.configuredSetupMode
   ): void {
     this.isBusyAnimating = false;
     this.selectedFromId = null;
@@ -275,7 +317,7 @@ class FrontlineTacticsApp {
       this.renderContinentReference();
     }
 
-    this.state.initNewGame(totalPlayers, 1, gameMode);
+    this.state.initNewGame(totalPlayers, 1, gameMode, setupMode);
     this.refreshAll();
   }
 
@@ -313,6 +355,20 @@ class FrontlineTacticsApp {
     if (this.state.pendingConquestMove) return;
 
     const clickedState = this.state.territories[territoryId];
+
+    if (this.state.phase === 'SETUP_CLAIM') {
+      if (clickedState.ownerId === -1) {
+        this.executePlayerClaim(territoryId);
+      }
+      return;
+    }
+
+    if (this.state.phase === 'SETUP_DEPLOY') {
+      if (clickedState.ownerId === player.id) {
+        this.executePlayerSetupDeploy(territoryId);
+      }
+      return;
+    }
 
     if (this.state.phase === 'REINFORCE') {
       if (this.state.currentPlayer.cards.length >= 5) {
@@ -611,6 +667,101 @@ class FrontlineTacticsApp {
   }
 
   // ============================================================================
+  // TURN-BY-TURN TERRITORY CLAIM (`SETUP_CLAIM`) & INITIAL DEPLOY (`SETUP_DEPLOY`)
+  // ============================================================================
+  private executePlayerClaim(territoryId: string): void {
+    const player = this.state.currentPlayer;
+    const isCapPick =
+      this.state.gameMode === 'CAPITALS' && !player.capitalTerritoryId;
+    if (!this.state.claimTerritory(territoryId)) return;
+
+    sound.playCapture();
+    const c = TERRITORY_MAP[territoryId].center;
+    this.scene3d.spawnShockwave(c[0], c[1], player.colorHex, 3.2);
+    this.scene3d.addFloatingPopup(
+      new THREE.Vector3(c[0], 3.8, c[1]),
+      isCapPick ? '🏛️ +5' : '🚩 +1',
+      player.colorCss
+    );
+    this.selectedFromId = territoryId;
+    this.refreshAll();
+    this.checkAndRunAITurn();
+  }
+
+  private executePlayerSetupDeploy(territoryId: string): void {
+    const player = this.state.currentPlayer;
+    if (!this.state.placeSetupArmy(territoryId, 1)) return;
+
+    sound.playReinforce(1);
+    const c = TERRITORY_MAP[territoryId].center;
+    this.scene3d.addFloatingPopup(
+      new THREE.Vector3(c[0], 3.6, c[1]),
+      '+1',
+      player.colorCss
+    );
+    this.selectedFromId = territoryId;
+    this.refreshAll();
+    this.checkAndRunAITurn();
+  }
+
+  private pickRecommendedClaimForHuman(): void {
+    if (
+      this.isBusyAnimating ||
+      this.state.phase !== 'SETUP_CLAIM' ||
+      this.state.currentPlayer.isAI
+    ) {
+      return;
+    }
+    const pick = GrandmasterAI.chooseTerritoryToClaim(
+      this.state,
+      this.state.currentPlayer.id
+    );
+    this.executePlayerClaim(pick.territoryId);
+  }
+
+  private autoCompleteClaimPhase(): void {
+    if (this.isBusyAnimating || this.state.phase !== 'SETUP_CLAIM') return;
+    sound.playPhaseChange();
+    while (
+      this.state.phase === 'SETUP_CLAIM' &&
+      this.state.getUnclaimedTerritories().length > 0
+    ) {
+      const p = this.state.currentPlayer;
+      const pick = GrandmasterAI.chooseTerritoryToClaim(this.state, p.id);
+      this.state.claimTerritory(pick.territoryId);
+    }
+    this.selectedFromId = null;
+    this.refreshAll();
+    this.checkAndRunAITurn();
+  }
+
+  private autoCompleteDeployPhase(): void {
+    if (
+      this.isBusyAnimating ||
+      (this.state.phase !== 'SETUP_DEPLOY' && this.state.phase !== 'SETUP_CLAIM')
+    ) {
+      return;
+    }
+    sound.playPhaseChange();
+    while (
+      this.state.phase === 'SETUP_CLAIM' &&
+      this.state.getUnclaimedTerritories().length > 0
+    ) {
+      const p = this.state.currentPlayer;
+      const pick = GrandmasterAI.chooseTerritoryToClaim(this.state, p.id);
+      this.state.claimTerritory(pick.territoryId);
+    }
+    while (this.state.phase === 'SETUP_DEPLOY') {
+      const p = this.state.currentPlayer;
+      const pick = GrandmasterAI.chooseSetupDeployment(this.state, p.id);
+      if (!this.state.placeSetupArmy(pick.territoryId, 1)) break;
+    }
+    this.selectedFromId = null;
+    this.refreshAll();
+    this.checkAndRunAITurn();
+  }
+
+  // ============================================================================
   // GRANDMASTER AI TURN ORCHESTRATOR (Animated & Transparent)
   // ============================================================================
   private checkAndRunAITurn(): void {
@@ -618,7 +769,114 @@ class FrontlineTacticsApp {
     if (!this.state.currentPlayer.isAI) return;
 
     this.isBusyAnimating = true;
+    if (this.state.phase === 'SETUP_CLAIM') {
+      window.setTimeout(
+        () => this.runAISetupClaimStep(),
+        Math.max(110, 260 / this.scene3d.animationSpeed)
+      );
+      return;
+    }
+    if (this.state.phase === 'SETUP_DEPLOY') {
+      window.setTimeout(
+        () => this.runAISetupDeployStep(),
+        Math.max(85, 190 / this.scene3d.animationSpeed)
+      );
+      return;
+    }
     this.runAIReinforceStep();
+  }
+
+  private runAISetupClaimStep(): void {
+    if (this.state.phase !== 'SETUP_CLAIM' || !this.state.currentPlayer.isAI) {
+      this.aiStatusText = '';
+      this.isBusyAnimating = false;
+      this.refreshAll();
+      return;
+    }
+
+    const ai = this.state.currentPlayer;
+    const isCapPick =
+      this.state.gameMode === 'CAPITALS' && !ai.capitalTerritoryId;
+    const decision = GrandmasterAI.chooseTerritoryToClaim(this.state, ai.id);
+    this.aiStatusText = `🚩 ${ai.name}: ${decision.reason} (${
+      TERRITORY_MAP[decision.territoryId].name
+    })`;
+    this.state.claimTerritory(decision.territoryId);
+    sound.playReinforce(1);
+
+    const c = TERRITORY_MAP[decision.territoryId].center;
+    this.scene3d.spawnShockwave(c[0], c[1], ai.colorHex, 2.8);
+    this.scene3d.addFloatingPopup(
+      new THREE.Vector3(c[0], 3.8, c[1]),
+      isCapPick ? '🏛️ +5' : '🚩 +1',
+      ai.colorCss
+    );
+    this.selectedFromId = decision.territoryId;
+    this.refreshAll();
+
+    if (!this.state.currentPlayer.isAI) {
+      this.aiStatusText = '';
+      this.isBusyAnimating = false;
+      this.refreshAll();
+      return;
+    }
+
+    window.setTimeout(() => {
+      if (this.state.phase === 'SETUP_CLAIM') {
+        this.runAISetupClaimStep();
+      } else if (this.state.phase === 'SETUP_DEPLOY') {
+        this.runAISetupDeployStep();
+      } else {
+        this.aiStatusText = '';
+        this.isBusyAnimating = false;
+        this.refreshAll();
+        this.checkAndRunAITurn();
+      }
+    }, Math.max(110, 260 / this.scene3d.animationSpeed));
+  }
+
+  private runAISetupDeployStep(): void {
+    if (this.state.phase !== 'SETUP_DEPLOY' || !this.state.currentPlayer.isAI) {
+      this.aiStatusText = '';
+      this.isBusyAnimating = false;
+      this.refreshAll();
+      return;
+    }
+
+    const ai = this.state.currentPlayer;
+    const decision = GrandmasterAI.chooseSetupDeployment(this.state, ai.id);
+    this.aiStatusText = `🪖 ${ai.name}: ${decision.reason} (+1 auf ${
+      TERRITORY_MAP[decision.territoryId].name
+    })`;
+    this.state.placeSetupArmy(decision.territoryId, 1);
+    sound.playReinforce(1);
+
+    const c = TERRITORY_MAP[decision.territoryId].center;
+    this.scene3d.addFloatingPopup(
+      new THREE.Vector3(c[0], 3.6, c[1]),
+      '+1',
+      ai.colorCss
+    );
+    this.selectedFromId = decision.territoryId;
+    this.refreshAll();
+
+    if (!this.state.currentPlayer.isAI) {
+      this.aiStatusText = '';
+      this.isBusyAnimating = false;
+      this.refreshAll();
+      return;
+    }
+
+    window.setTimeout(() => {
+      if (this.state.phase === 'SETUP_DEPLOY') {
+        this.runAISetupDeployStep();
+      } else {
+        this.aiStatusText = '';
+        this.isBusyAnimating = false;
+        this.refreshAll();
+        this.checkAndRunAITurn();
+      }
+    }, Math.max(85, 190 / this.scene3d.animationSpeed));
   }
 
   private runAIReinforceStep(): void {
@@ -898,7 +1156,15 @@ class FrontlineTacticsApp {
     const p = this.state.currentPlayer;
 
     if (!p.isAI && !this.state.pendingConquestMove) {
-      if (this.state.phase === 'ATTACK' && this.selectedFromId) {
+      if (this.state.phase === 'SETUP_CLAIM') {
+        for (const t of this.state.getUnclaimedTerritories()) {
+          validTargets.push(t.id);
+        }
+      } else if (this.state.phase === 'SETUP_DEPLOY') {
+        for (const t of this.state.getPlayerTerritories(p.id)) {
+          validTargets.push(t.id);
+        }
+      } else if (this.state.phase === 'ATTACK' && this.selectedFromId) {
         for (const nId of TERRITORY_MAP[this.selectedFromId].neighbors) {
           if (this.state.territories[nId].ownerId !== p.id) {
             validTargets.push(nId);
@@ -1130,11 +1396,35 @@ class FrontlineTacticsApp {
   }
 
   private renderCommandBar(): void {
-    // Phase stepper highlight
-    document.querySelectorAll('.phase-step').forEach((el) => {
-      const ph = (el as HTMLElement).dataset.phase;
-      el.classList.toggle('active', ph === this.state.phase);
-    });
+    const stepperEl = document.getElementById('phase-stepper');
+    if (stepperEl) {
+      if (
+        this.state.phase === 'SETUP_CLAIM' ||
+        this.state.phase === 'SETUP_DEPLOY'
+      ) {
+        stepperEl.innerHTML = `
+          <div class="phase-step ${
+            this.state.phase === 'SETUP_CLAIM' ? 'active' : ''
+          }" data-phase="SETUP_CLAIM">1. Gebietswahl (Reihum)</div>
+          <div class="phase-step ${
+            this.state.phase === 'SETUP_DEPLOY' ? 'active' : ''
+          }" data-phase="SETUP_DEPLOY">2. Start-Armeen (Reihum)</div>
+          <div class="phase-step" data-phase="REINFORCE">3. Gefecht</div>
+        `;
+      } else {
+        stepperEl.innerHTML = `
+          <div class="phase-step ${
+            this.state.phase === 'REINFORCE' ? 'active' : ''
+          }" data-phase="REINFORCE">1. Verstärken</div>
+          <div class="phase-step ${
+            this.state.phase === 'ATTACK' ? 'active' : ''
+          }" data-phase="ATTACK">2. Angreifen</div>
+          <div class="phase-step ${
+            this.state.phase === 'FORTIFY' ? 'active' : ''
+          }" data-phase="FORTIFY">3. Verschieben</div>
+        `;
+      }
+    }
 
     const p = this.state.currentPlayer;
     this.commandContentEl.innerHTML = '';
@@ -1170,13 +1460,67 @@ class FrontlineTacticsApp {
           <span>${
             this.aiStatusText || `🤖 ${p.name} berechnet den optimalen Zug...`
           }</span>
-          ${this. renderDiceSummaryHTML()}
+          ${this.renderDiceSummaryHTML()}
         </div>
       `;
       return;
     }
 
-    // Human player's turn
+    // Human player's turn in SETUP_CLAIM (Reihum Gebietswahl)
+    if (this.state.phase === 'SETUP_CLAIM') {
+      const unclaimedCount = this.state.getUnclaimedTerritories().length;
+      const isCapPick =
+        this.state.gameMode === 'CAPITALS' && !p.capitalTerritoryId;
+      this.btnNextPhase.disabled = true;
+      this.btnNextPhase.textContent = `Noch ${unclaimedCount} frei`;
+
+      const wrap = document.createElement('div');
+      wrap.className = 'cmd-instruction';
+      wrap.innerHTML = `
+        <span>${
+          isCapPick
+            ? `🏛️ <strong>Hauptstadt wählen:</strong> Klicke auf ein freies Gebiet für deine Hauptstadt (+4 Garnison)!`
+            : `🚩 <strong>Reihum Gebietswahl (${unclaimedCount}/42 frei):</strong> Klicke auf ein freies Gebiet (🏳️ Frei), um es zu besetzen!`
+        }</span>
+        <button class="hud-btn primary" id="btn-claim-suggest" title="Optimales Gebiet für diesen Zug automatisch wählen">🎯 KI-Tipp wählen</button>
+        <button class="hud-btn" id="btn-claim-auto" title="Restliche freie Gebiete reihum automatisch verteilen">⚡ Restliche Gebiete auto</button>
+        <button class="hud-btn" id="btn-setup-full-auto" title="Komplette Aufstellung abschließen und direkt mit Runde 1 starten">🚀 Direkt zum Gefecht</button>
+      `;
+      this.commandContentEl.appendChild(wrap);
+
+      wrap
+        .querySelector('#btn-claim-suggest')
+        ?.addEventListener('click', () => this.pickRecommendedClaimForHuman());
+      wrap
+        .querySelector('#btn-claim-auto')
+        ?.addEventListener('click', () => this.autoCompleteClaimPhase());
+      wrap
+        .querySelector('#btn-setup-full-auto')
+        ?.addEventListener('click', () => this.autoCompleteDeployPhase());
+      return;
+    }
+
+    // Human player's turn in SETUP_DEPLOY (Reihum Start-Armeen verteilen)
+    if (this.state.phase === 'SETUP_DEPLOY') {
+      const rem = this.state.setupArmiesRemaining[p.id] ?? 0;
+      this.btnNextPhase.disabled = true;
+      this.btnNextPhase.textContent = `Noch ${rem} Truppen`;
+
+      const wrap = document.createElement('div');
+      wrap.className = 'cmd-instruction';
+      wrap.innerHTML = `
+        <span>🪖 <strong>Start-Armeen reihum platzieren:</strong> Klicke auf eines deiner Gebiete für <strong>+1 Truppe</strong> (noch <strong>${rem}</strong> übrig)</span>
+        <button class="hud-btn primary" id="btn-deploy-auto" title="Alle verbleibenden Start-Truppen reihum automatisch aufstellen">⚡ Restliche Start-Truppen automatisch verteilen</button>
+      `;
+      this.commandContentEl.appendChild(wrap);
+
+      wrap
+        .querySelector('#btn-deploy-auto')
+        ?.addEventListener('click', () => this.autoCompleteDeployPhase());
+      return;
+    }
+
+    // Human player's turn in REINFORCE
     if (this.state.phase === 'REINFORCE') {
       this.btnNextPhase.disabled = this.state.reinforcementsRemaining > 0;
       this.btnNextPhase.textContent = 'Weiter zum Angriff ➔';

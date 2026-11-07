@@ -603,6 +603,7 @@ export class Scene3D {
     while (armyGroup.children.length > 0) {
       armyGroup.remove(armyGroup.children[0]);
     }
+    if (troops <= 0) return;
 
     const unitMat = new THREE.MeshStandardMaterial({
       color: colorHex,
@@ -728,23 +729,32 @@ export class Scene3D {
     for (const tDef of TERRITORIES) {
       const tState = state.territories[tDef.id];
       const tm = this.territoryMeshes[tDef.id];
-      const player = state.players[tState.ownerId];
+      const isUnclaimed = tState.ownerId === -1;
+      const player = isUnclaimed ? null : state.players[tState.ownerId];
 
-      // Blend player faction color (78%) with continent color (22%) for tactical clarity
-      const pColor = new THREE.Color(player.colorHex);
       const cColor = new THREE.Color(CONTINENTS[tDef.continent].baseColor);
-      tm.targetColor.copy(pColor).lerp(cColor, 0.22);
+      if (isUnclaimed || !player) {
+        // Unclaimed territory: blend neutral slate with continent color so continent regions remain recognizable
+        const neutralColor = new THREE.Color(0x283548);
+        tm.targetColor.copy(neutralColor).lerp(cColor, 0.45);
+      } else {
+        // Blend player faction color (78%) with continent color (22%) for tactical clarity
+        const pColor = new THREE.Color(player.colorHex);
+        tm.targetColor.copy(pColor).lerp(cColor, 0.22);
+      }
 
       const isSelected = selectedId === tDef.id;
       const isTarget = this.highlightedTargets.has(tDef.id);
       const isHovered = this.hoveredTerritoryId === tDef.id;
 
-      if (isSelected) {
+      if (isSelected && player) {
         tm.targetY = 0.75;
         tm.material.emissive.setHex(player.colorHex).multiplyScalar(0.35);
       } else if (isTarget) {
-        tm.targetY = isHovered ? 0.55 : 0.3;
-        tm.material.emissive.setHex(0xfacc15).multiplyScalar(isHovered ? 0.35 : 0.18);
+        tm.targetY = isHovered ? 0.55 : isUnclaimed ? 0.15 : 0.3;
+        tm.material.emissive
+          .setHex(isUnclaimed ? 0x38bdf8 : 0xfacc15)
+          .multiplyScalar(isHovered ? 0.38 : 0.15);
       } else if (isHovered) {
         tm.targetY = 0.35;
         tm.material.emissive.setHex(0xffffff).multiplyScalar(0.12);
@@ -760,8 +770,8 @@ export class Scene3D {
         ringMat.color.setHex(0xffffff);
         ringMat.opacity = 0.9;
       } else if (isTarget) {
-        ringMat.color.setHex(0xfacc15);
-        ringMat.opacity = 0.85;
+        ringMat.color.setHex(isUnclaimed ? 0x38bdf8 : 0xfacc15);
+        ringMat.opacity = isUnclaimed ? (isHovered ? 0.9 : 0.45) : 0.85;
       } else if (isCapital) {
         ringMat.color.setHex(0xfbbf24);
         ringMat.opacity = 0.72;
@@ -776,20 +786,31 @@ export class Scene3D {
       ) {
         tm.lastTroopCount = tState.troops;
         tm.lastOwnerId = tState.ownerId;
-        this.rebuildArmyFigures(tm.armyGroup, tState.troops, player.colorHex);
+        this.rebuildArmyFigures(
+          tm.armyGroup,
+          tState.troops,
+          player ? player.colorHex : 0x64748b
+        );
       }
 
       // Update HTML badge content
       const lbl = this.labelElements[tDef.id];
       if (lbl) {
-        lbl.countEl.textContent = isCapital
-          ? `🏛️ ${tState.troops}`
-          : String(tState.troops);
-        lbl.countEl.style.backgroundColor = player.colorCss;
-        lbl.nameEl.textContent = isCapital ? `★ ${tDef.name}` : tDef.name;
+        if (isUnclaimed || !player) {
+          lbl.countEl.textContent = '🏳️ Frei';
+          lbl.countEl.style.backgroundColor = 'rgba(30, 41, 59, 0.88)';
+          lbl.nameEl.textContent = tDef.name;
+        } else {
+          lbl.countEl.textContent = isCapital
+            ? `🏛️ ${tState.troops}`
+            : String(tState.troops);
+          lbl.countEl.style.backgroundColor = player.colorCss;
+          lbl.nameEl.textContent = isCapital ? `★ ${tDef.name}` : tDef.name;
+        }
         lbl.root.classList.toggle('selected', isSelected);
         lbl.root.classList.toggle('target', isTarget);
         lbl.root.classList.toggle('capital', isCapital);
+        lbl.root.classList.toggle('unclaimed', isUnclaimed);
       }
     }
   }
@@ -1185,7 +1206,7 @@ export class Scene3D {
     }
   }
 
-  private spawnShockwave(
+  public spawnShockwave(
     x: number,
     z: number,
     colorHex: number,
