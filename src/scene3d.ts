@@ -30,6 +30,7 @@ interface TerritoryMeshData {
   capitalCrownGroup: THREE.Group;
   baseY: number;
   targetY: number;
+  shakeIntensity: number;
   currentColor: THREE.Color;
   targetColor: THREE.Color;
   lastTroopCount: number;
@@ -140,8 +141,7 @@ export class Scene3D {
   private battleArrowGroup: THREE.Group;
   private diceMaterialsCache: Record<string, THREE.MeshStandardMaterial[]> = {};
 
-  // Camera shake & smooth fly-to state
-  private shakeIntensity = 0;
+  // Smooth camera fly-to state
   private isTopDownView = false;
   private cameraLerpTargetPos: THREE.Vector3 | null = null;
   private cameraLerpLookAt: THREE.Vector3 | null = null;
@@ -249,8 +249,10 @@ export class Scene3D {
     );
   }
 
-  public triggerCameraShake(intensity = 0.65): void {
-    this.shakeIntensity = Math.min(1.6, Math.max(this.shakeIntensity, intensity));
+  public triggerTerritoryShake(territoryId: string, intensity = 0.35): void {
+    const tm = this.territoryMeshes[territoryId];
+    if (!tm) return;
+    tm.shakeIntensity = Math.min(0.65, Math.max(tm.shakeIntensity, intensity));
   }
 
   /**
@@ -640,6 +642,7 @@ export class Scene3D {
         capitalCrownGroup,
         baseY: 0,
         targetY: 0,
+        shakeIntensity: 0,
         currentColor: contColor.clone(),
         targetColor: contColor.clone(),
         lastTroopCount: -1,
@@ -1277,9 +1280,9 @@ export class Scene3D {
     this.spawnLightFlash(pFrom.x, 3.2, pFrom.z, 0xfef08a, 4.5, 0.18);
 
     this.spawnProjectile(pFrom, pTo, attackerColor, () => {
+      this.triggerTerritoryShake(toId, 0.25 + 0.12 * roll.defenderLosses);
       if (roll.defenderLosses > 0) {
         sound.playExplosion(roll.defenderLosses);
-        this.triggerCameraShake(0.32 * roll.defenderLosses);
         this.spawnLightFlash(pTo.x, 3.8, pTo.z, 0xff6b35, 8.0, 0.35);
         this.spawnExplosion(pTo.x, pTo.z, 0xff6b35);
         this.spawnShockwave(pTo.x, pTo.z, attackerColor, 3.2);
@@ -1294,7 +1297,6 @@ export class Scene3D {
     this.spawnProjectile(pTo, pFrom, defenderColor, () => {
       if (roll.attackerLosses > 0) {
         sound.playExplosion(roll.attackerLosses);
-        this.triggerCameraShake(0.32 * roll.attackerLosses);
         this.spawnLightFlash(pFrom.x, 3.8, pFrom.z, 0x38bdf8, 8.0, 0.35);
         this.spawnExplosion(pFrom.x, pFrom.z, 0x38bdf8);
         this.spawnShockwave(pFrom.x, pFrom.z, defenderColor, 3.2);
@@ -1316,7 +1318,7 @@ export class Scene3D {
   public triggerCaptureCelebration(territoryId: string, colorHex: number): void {
     const c = TERRITORY_MAP[territoryId].center;
     sound.playCapture();
-    this.triggerCameraShake(0.75);
+    this.triggerTerritoryShake(territoryId, 0.45);
     this.spawnLightFlash(c[0], 4.5, c[1], colorHex, 12.0, 0.55);
     this.spawnShockwave(c[0], c[1], colorHex, 5.2);
     this.spawnExplosion(c[0], c[1], colorHex, 28);
@@ -1672,15 +1674,6 @@ export class Scene3D {
 
     this.controls.update();
 
-    // Apply subtle screen/camera shake during explosions
-    if (this.shakeIntensity > 0.005) {
-      this.camera.position.x += (Math.random() - 0.5) * this.shakeIntensity;
-      this.camera.position.y += (Math.random() - 0.5) * this.shakeIntensity * 0.7;
-      this.shakeIntensity *= Math.pow(0.04, dt);
-    } else {
-      this.shakeIntensity = 0;
-    }
-
     // Celebrate victory with periodic 3D fireworks over the war table
     if (this.isGameOverCelebration) {
       this.fireworkTimer -= dt;
@@ -1696,10 +1689,21 @@ export class Scene3D {
       }
     }
 
-    // Smooth territory elevation, color transitions & capital crystal rotation
+    // Smooth territory elevation, local hit vibration, color transitions & capital crystal rotation
     for (const tm of Object.values(this.territoryMeshes)) {
       tm.group.position.y +=
         (tm.targetY - tm.group.position.y) * Math.min(1, dt * 12);
+
+      if (tm.shakeIntensity > 0.005) {
+        tm.group.position.x = (Math.random() - 0.5) * tm.shakeIntensity;
+        tm.group.position.z = (Math.random() - 0.5) * tm.shakeIntensity;
+        tm.shakeIntensity *= Math.pow(0.015, dt);
+      } else {
+        tm.shakeIntensity = 0;
+        tm.group.position.x = 0;
+        tm.group.position.z = 0;
+      }
+
       tm.currentColor.lerp(tm.targetColor, Math.min(1, dt * 10));
       tm.material.color.copy(tm.currentColor);
 
