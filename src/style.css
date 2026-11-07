@@ -217,20 +217,30 @@ html {
   color: #94a3b8;
 }
 
-.speed-btn {
+.speed-btn,
+.lens-btn {
   background: transparent;
   border: none;
   color: #cbd5e1;
   font-weight: 700;
-  font-size: 12px;
+  font-size: 11.5px;
   padding: 4px 7px;
   border-radius: 6px;
   cursor: pointer;
+  transition: all 0.15s ease;
 }
 
-.speed-btn.active {
-  background: #3b82f6;
+.speed-btn:hover,
+.lens-btn:hover {
+  color: #ffffff;
+  background: rgba(59, 130, 246, 0.2);
+}
+
+.speed-btn.active,
+.lens-btn.active {
+  background: linear-gradient(135deg, #3b82f6, #2563eb);
   color: #fff;
+  box-shadow: 0 2px 8px rgba(59, 130, 246, 0.45);
 }
 
 .hud-btn {
@@ -288,11 +298,48 @@ html {
 
 .continent-row {
   display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+  padding: 5px 6px;
+  border-radius: 7px;
+  border-bottom: 1px solid rgba(148, 163, 184, 0.1);
+  cursor: pointer;
+  transition: background 0.15s ease, transform 0.15s ease;
+}
+
+.continent-row:hover {
+  background: rgba(56, 189, 248, 0.12);
+  transform: translateX(2px);
+}
+
+.continent-row.controlled {
+  background: rgba(16, 185, 129, 0.1);
+}
+
+.continent-row-top {
+  display: flex;
   align-items: center;
   justify-content: space-between;
-  font-size: 12px;
-  padding: 4px 0;
-  border-bottom: 1px solid rgba(148, 163, 184, 0.12);
+}
+
+.continent-row-top small {
+  color: #94a3b8;
+  font-size: 10.5px;
+}
+
+.continent-mini-bar {
+  width: 100%;
+  height: 4px;
+  background: rgba(15, 23, 42, 0.85);
+  border-radius: 999px;
+  overflow: hidden;
+}
+
+.continent-mini-fill {
+  height: 100%;
+  border-radius: 999px;
+  transition: width 0.3s ease;
 }
 
 .continent-swatch {
@@ -320,8 +367,8 @@ html {
 }
 
 #player-cards-list {
-  display: flex;
-  flex-wrap: wrap;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
   gap: 6px;
   margin-bottom: 8px;
   min-height: 28px;
@@ -329,13 +376,50 @@ html {
 
 .risk-card-chip {
   font-size: 11px;
-  padding: 4px 8px;
-  border-radius: 6px;
-  background: rgba(30, 41, 59, 0.9);
-  border: 1px solid rgba(148, 163, 184, 0.35);
+  padding: 6px 8px;
+  border-radius: 8px;
+  background: linear-gradient(145deg, rgba(30, 41, 59, 0.92), rgba(15, 23, 42, 0.95));
+  border: 1px solid rgba(148, 163, 184, 0.32);
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  transition: transform 0.15s ease, border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.risk-card-chip:hover {
+  transform: translateY(-2px);
+  border-color: #60a5fa;
+  box-shadow: 0 4px 12px rgba(59, 130, 246, 0.28);
+}
+
+.risk-card-chip.owns-territory {
+  border-color: rgba(250, 204, 21, 0.65);
+  background: linear-gradient(145deg, rgba(30, 41, 59, 0.95), rgba(66, 32, 6, 0.45));
+}
+
+.card-chip-top {
   display: flex;
   align-items: center;
-  gap: 5px;
+  justify-content: space-between;
+  gap: 4px;
+}
+
+.card-chip-terr {
+  font-size: 10.5px;
+  color: #94a3b8;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.card-bonus-tag {
+  font-size: 9.5px;
+  font-weight: 800;
+  color: #fde047;
+  background: rgba(234, 179, 8, 0.22);
+  border: 1px solid rgba(250, 204, 21, 0.45);
+  padding: 1px 4px;
+  border-radius: 4px;
 }
 
 #log-panel {
@@ -922,4 +1006,188 @@ html {
   background: rgba(15, 23, 42, 0.7);
   color: #facc15;
   border: 1px solid rgba(250, 204, 21, 0.35);
+}
+
+/* Cinematic Turn / Event Banner */
+.turn-banner {
+  position: absolute;
+  top: 86px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 12;
+  pointer-events: none;
+  animation: bannerSweep 2.1s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+
+.turn-banner-inner {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  padding: 8px 28px;
+  border-radius: 999px;
+  background: linear-gradient(
+    90deg,
+    rgba(15, 23, 42, 0.2),
+    rgba(15, 23, 42, 0.94) 22%,
+    rgba(15, 23, 42, 0.94) 78%,
+    rgba(15, 23, 42, 0.2)
+  );
+  border-top: 1px solid var(--banner-accent, #38bdf8);
+  border-bottom: 1px solid var(--banner-accent, #38bdf8);
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.65),
+    0 0 22px rgba(56, 189, 248, 0.22);
+}
+
+.turn-banner-sub {
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 2px;
+  color: #93c5fd;
+}
+
+.turn-banner-title {
+  font-size: 15px;
+  font-weight: 900;
+  letter-spacing: 1px;
+  color: #ffffff;
+  text-shadow: 0 0 12px var(--banner-accent, #38bdf8);
+}
+
+@keyframes bannerSweep {
+  0% {
+    opacity: 0;
+    transform: translate(-50%, -14px) scale(0.92);
+  }
+  15% {
+    opacity: 1;
+    transform: translate(-50%, 0) scale(1);
+  }
+  80% {
+    opacity: 1;
+    transform: translate(-50%, 0) scale(1);
+  }
+  100% {
+    opacity: 0;
+    transform: translate(-50%, -8px) scale(0.97);
+  }
+}
+
+/* Holographic Territory Intel HUD Card */
+.territory-intel-card {
+  position: absolute;
+  bottom: 92px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 8;
+  min-width: 290px;
+  max-width: 380px;
+  padding: 10px 14px;
+  pointer-events: none;
+  border: 1px solid rgba(56, 189, 248, 0.42);
+  background: linear-gradient(
+    145deg,
+    rgba(15, 23, 42, 0.94),
+    rgba(9, 18, 34, 0.96)
+  );
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.65),
+    0 0 18px rgba(56, 189, 248, 0.16);
+}
+
+.intel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding-bottom: 6px;
+  margin-bottom: 6px;
+  border-bottom: 1px solid rgba(148, 163, 184, 0.18);
+}
+
+.intel-title {
+  font-size: 14px;
+  font-weight: 800;
+  color: #f8fafc;
+}
+
+.intel-continent {
+  font-size: 11px;
+  font-weight: 600;
+  color: #94a3b8;
+  display: flex;
+  align-items: center;
+  margin-top: 2px;
+}
+
+.intel-troop-badge {
+  font-size: 13px;
+  font-weight: 800;
+  color: #ffffff;
+  padding: 4px 10px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.75);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.45);
+}
+
+.intel-meta-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 11.5px;
+}
+
+.intel-meta-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  color: #cbd5e1;
+}
+
+.intel-combat-odds {
+  margin-top: 7px;
+  padding: 5px 9px;
+  border-radius: 6px;
+  font-size: 11.5px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.intel-combat-odds.odds-high {
+  background: rgba(16, 185, 129, 0.2);
+  border: 1px solid rgba(52, 211, 153, 0.5);
+  color: #6ee7b7;
+}
+
+.intel-combat-odds.odds-mid {
+  background: rgba(245, 158, 11, 0.2);
+  border: 1px solid rgba(251, 191, 36, 0.5);
+  color: #fde047;
+}
+
+.intel-combat-odds.odds-low {
+  background: rgba(239, 68, 68, 0.2);
+  border: 1px solid rgba(248, 113, 113, 0.5);
+  color: #fca5a5;
+}
+
+/* Custom sleek scrollbars */
+::-webkit-scrollbar {
+  width: 5px;
+  height: 5px;
+}
+
+::-webkit-scrollbar-track {
+  background: rgba(15, 23, 42, 0.4);
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(100, 116, 139, 0.5);
+  border-radius: 999px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(56, 189, 248, 0.7);
 }

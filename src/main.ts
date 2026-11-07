@@ -24,7 +24,7 @@ import {
   TERRITORIES,
   TERRITORY_MAP,
 } from './mapData';
-import { Scene3D } from './scene3d';
+import { MapLensMode, Scene3D } from './scene3d';
 import { sound } from './sound';
 
 class FrontlineTacticsApp {
@@ -42,6 +42,8 @@ class FrontlineTacticsApp {
   private configuredSetupMode: SetupMode = 'CLAIM_TURNS';
   private configuredMapType: MapType = 'CLASSIC';
   private secretMissionHidden = false;
+  private lastAnnouncedTurnKey = '';
+  private bannerTimeoutId: number | null = null;
 
   // DOM Elements
   private playersBarEl = document.getElementById('players-bar')!;
@@ -49,6 +51,10 @@ class FrontlineTacticsApp {
   private claimModeBtnEl = document.getElementById('btn-claim-mode')!;
   private randomMapBtnEl = document.getElementById('btn-random-map')!;
   private worldNameBadgeEl = document.getElementById('world-name-badge')!;
+  private intelCardEl = document.getElementById('territory-intel-card')!;
+  private turnBannerEl = document.getElementById('turn-banner')!;
+  private turnBannerSubEl = document.getElementById('turn-banner-sub')!;
+  private turnBannerTitleEl = document.getElementById('turn-banner-title')!;
   private objectivePanelTitleEl = document.getElementById(
     'objective-panel-title'
   )!;
@@ -80,7 +86,10 @@ class FrontlineTacticsApp {
       container,
       overlay,
       (tId) => this.handleTerritoryClick(tId),
-      (_tId) => this.syncSceneHighlights()
+      (tId) => {
+        this.syncSceneHighlights();
+        this.renderTerritoryIntelCard(tId);
+      }
     );
 
     this.bindUIEvents();
@@ -89,6 +98,29 @@ class FrontlineTacticsApp {
   }
 
   private bindUIEvents(): void {
+    // Map Lens buttons (FACTIONS, CONTINENTS, HEATMAP)
+    document.querySelectorAll('.lens-btn').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        sound.playClick(1.15);
+        document
+          .querySelectorAll('.lens-btn')
+          .forEach((b) => b.classList.remove('active'));
+        btn.classList.add('active');
+        const lens = ((btn as HTMLElement).dataset.lens ||
+          'FACTIONS') as MapLensMode;
+        this.scene3d.mapLens = lens;
+        this.syncSceneHighlights();
+      });
+    });
+
+    // Camera View toggle button (3D Command vs. Tactical Top-Down)
+    const btnCam = document.getElementById('btn-camera-view');
+    btnCam?.addEventListener('click', () => {
+      sound.playClick(1.05);
+      const isTopDown = this.scene3d.toggleCameraView();
+      btnCam.textContent = isTopDown ? '🗺️ Draufsicht' : '🎥 3D-Blick';
+    });
+
     // Speed buttons
     document.querySelectorAll('.speed-btn').forEach((btn) => {
       btn.addEventListener('click', () => {
@@ -336,14 +368,51 @@ class FrontlineTacticsApp {
 
     for (const cId of Object.keys(CONTINENTS) as ContinentId[]) {
       const c = CONTINENTS[cId];
-      const count = TERRITORIES.filter((t) => t.continent === cId).length;
+      const cTerrs = TERRITORIES.filter((t) => t.continent === cId);
+      const count = cTerrs.length;
+      const myOwned = cTerrs.filter(
+        (t) => this.state.territories[t.id]?.ownerId === 0
+      ).length;
+
+      // Check if any player controls the entire continent
+      let fullOwnerId: number | null = null;
+      const firstOwner = this.state.territories[cTerrs[0]?.id]?.ownerId;
+      if (
+        firstOwner !== undefined &&
+        firstOwner >= 0 &&
+        cTerrs.every((t) => this.state.territories[t.id]?.ownerId === firstOwner)
+      ) {
+        fullOwnerId = firstOwner;
+      }
+      const fullOwner =
+        fullOwnerId !== null ? this.state.players[fullOwnerId] : null;
+
       const row = document.createElement('div');
-      row.className = 'continent-row';
+      row.className = `continent-row ${fullOwner ? 'controlled' : ''}`;
       const hexStr = '#' + c.baseColor.toString(16).padStart(6, '0');
+      const pct = Math.round((myOwned / Math.max(1, count)) * 100);
+
       row.innerHTML = `
-        <span><i class="continent-swatch" style="background:${hexStr}"></i>${c.name} (${count})</span>
-        <strong>+${c.bonus} / Runde</strong>
+        <div class="continent-row-top">
+          <span><i class="continent-swatch" style="background:${hexStr}"></i>${c.name} <small>(${myOwned}/${count})</small></span>
+          <strong>+${c.bonus}</strong>
+        </div>
+        <div class="continent-mini-bar">
+          <div class="continent-mini-fill" style="width:${pct}%;background:${
+        fullOwner ? fullOwner.colorCss : hexStr
+      }"></div>
+        </div>
       `;
+
+      row.addEventListener('mouseenter', () => {
+        this.scene3d.setHighlightedContinent(cId);
+        this.syncSceneHighlights();
+      });
+      row.addEventListener('mouseleave', () => {
+        this.scene3d.setHighlightedContinent(null);
+        this.syncSceneHighlights();
+      });
+
       this.continentListEl.appendChild(row);
     }
   }
@@ -1191,11 +1260,150 @@ class FrontlineTacticsApp {
 
   private refreshAll(): void {
     this.syncSceneHighlights();
+    this.renderContinentReference();
     this.renderPlayersBar();
     this.renderObjectivePanel();
     this.renderScoreRanking();
     this.renderCardsAndLogs();
     this.renderCommandBar();
+    this.renderTerritoryIntelCard(this.scene3d.hoveredId);
+    this.checkAndShowTurnBanner();
+  }
+
+  private checkAndShowTurnBanner(): void {
+    const p = this.state.currentPlayer;
+    if (!p) return;
+
+    if (this.state.phase === 'GAME_OVER') {
+      const winKey = `GAMEOVER_${this.state.winnerId}`;
+      if (this.lastAnnouncedTurnKey !== winKey) {
+        this.lastAnnouncedTurnKey = winKey;
+        const winner =
+          this.state.winnerId !== null
+            ? this.state.players[this.state.winnerId]
+            : p;
+        this.showTurnBanner(
+          '🏆 SIEG ERRUNGEN',
+          `${winner.name.toUpperCase()} GEWINNT!`,
+          winner.colorCss
+        );
+      }
+      return;
+    }
+
+    if (
+      this.state.phase === 'SETUP_CLAIM' ||
+      this.state.phase === 'SETUP_DEPLOY'
+    ) {
+      return;
+    }
+
+    const turnKey = `${this.state.turnNumber}_${p.id}`;
+    if (this.lastAnnouncedTurnKey !== turnKey) {
+      this.lastAnnouncedTurnKey = turnKey;
+      this.showTurnBanner(
+        `RUNDE ${this.state.turnNumber}`,
+        `${p.name.toUpperCase()} AM ZUG`,
+        p.colorCss
+      );
+    }
+  }
+
+  private showTurnBanner(sub: string, title: string, accentColor: string): void {
+    if (!this.turnBannerEl) return;
+    this.turnBannerSubEl.textContent = sub;
+    this.turnBannerTitleEl.textContent = title;
+    this.turnBannerEl.style.setProperty('--banner-accent', accentColor);
+    this.turnBannerEl.classList.remove('hidden');
+
+    if (this.bannerTimeoutId !== null) {
+      window.clearTimeout(this.bannerTimeoutId);
+    }
+    this.bannerTimeoutId = window.setTimeout(() => {
+      this.turnBannerEl.classList.add('hidden');
+    }, 2100);
+  }
+
+  private renderTerritoryIntelCard(territoryId: string | null): void {
+    if (!this.intelCardEl) return;
+    if (!territoryId || !TERRITORY_MAP[territoryId]) {
+      this.intelCardEl.classList.add('hidden');
+      return;
+    }
+
+    const tDef = TERRITORY_MAP[territoryId];
+    const tState = this.state.territories[territoryId];
+    const cont = CONTINENTS[tDef.continent];
+    const contHex = '#' + cont.baseColor.toString(16).padStart(6, '0');
+    const isUnclaimed = tState.ownerId === -1;
+    const owner = isUnclaimed ? null : this.state.players[tState.ownerId];
+    const isCapital = this.state.isCapitalTerritory(territoryId);
+
+    // Calculate friendly vs hostile neighbors
+    let enemyNeighbors = 0;
+    let enemyTroopsAdjacent = 0;
+    for (const nId of tDef.neighbors) {
+      const nState = this.state.territories[nId];
+      if (nState && nState.ownerId !== -1 && nState.ownerId !== tState.ownerId) {
+        enemyNeighbors++;
+        enemyTroopsAdjacent += nState.troops;
+      }
+    }
+
+    // If human has an attacker selected in ATTACK phase and hovers a neighboring enemy territory, show live combat odds!
+    let combatOddsHtml = '';
+    if (
+      this.state.phase === 'ATTACK' &&
+      this.selectedFromId &&
+      this.selectedFromId !== territoryId &&
+      tState.ownerId !== this.state.currentPlayer.id &&
+      TERRITORY_MAP[this.selectedFromId].neighbors.includes(territoryId)
+    ) {
+      const atkTroops = this.state.territories[this.selectedFromId].troops;
+      const winPct = Math.round(
+        getConquestProbability(atkTroops, tState.troops) * 100
+      );
+      const oddsClass =
+        winPct >= 65 ? 'odds-high' : winPct >= 40 ? 'odds-mid' : 'odds-low';
+      combatOddsHtml = `
+        <div class="intel-combat-odds ${oddsClass}">
+          <span>⚔️ Angriff von ${TERRITORY_MAP[this.selectedFromId].name}:</span>
+          <strong>${winPct}% Siegchance</strong>
+        </div>
+      `;
+    }
+
+    this.intelCardEl.classList.remove('hidden');
+    this.intelCardEl.innerHTML = `
+      <div class="intel-header">
+        <div>
+          <div class="intel-title">${isCapital ? '🏛️ ' : ''}${tDef.name}</div>
+          <div class="intel-continent"><i class="continent-swatch" style="background:${contHex}"></i>${cont.name} (+${cont.bonus})</div>
+        </div>
+        <span class="intel-troop-badge" style="background:${
+          owner ? owner.colorCss : '#334155'
+        }">🪖 ${tState.troops}</span>
+      </div>
+      <div class="intel-meta-grid">
+        <div class="intel-meta-row">
+          <span>Kommandant:</span>
+          <strong style="color:${owner ? owner.colorCss : '#94a3b8'}">${
+      owner ? owner.name : '🏳️ Neutral / Frei'
+    }</strong>
+        </div>
+        <div class="intel-meta-row">
+          <span>Grenz-Status:</span>
+          <strong>${
+            isUnclaimed
+              ? 'Unbesetzt'
+              : enemyNeighbors === 0
+              ? '🛡️ Sicheres Hinterland'
+              : `🔥 Frontlinie (${enemyNeighbors} Feind-Nachbarn, ${enemyTroopsAdjacent} 🪖)`
+          }</strong>
+        </div>
+      </div>
+      ${combatOddsHtml}
+    `;
   }
 
   private renderObjectivePanel(): void {
@@ -1370,11 +1578,34 @@ class FrontlineTacticsApp {
       };
       for (const c of human.cards) {
         const chip = document.createElement('div');
-        chip.className = 'risk-card-chip';
+        const ownsTerritory =
+          c.territoryId !== null &&
+          this.state.territories[c.territoryId]?.ownerId === human.id;
+        chip.className = `risk-card-chip symbol-${c.symbol} ${
+          ownsTerritory ? 'owns-territory' : ''
+        }`;
         const terrName = c.territoryId
           ? TERRITORY_MAP[c.territoryId].name
           : 'Alle Symbole';
-        chip.innerHTML = `<strong>${symIcons[c.symbol]}</strong> <span>(${terrName})</span>`;
+        chip.innerHTML = `
+          <div class="card-chip-top">
+            <strong>${symIcons[c.symbol]}</strong>
+            ${
+              ownsTerritory
+                ? '<span class="card-bonus-tag" title="Du hältst dieses Gebiet (+2 Bonus-Truppen beim Eintauschen)">+2 🪖</span>'
+                : ''
+            }
+          </div>
+          <span class="card-chip-terr">${terrName}</span>
+        `;
+        if (c.territoryId) {
+          chip.style.cursor = 'pointer';
+          chip.title = `Klicken, um ${terrName} auf der 3D-Karte zu fokussieren`;
+          chip.addEventListener('click', () => {
+            sound.playClick(1.1);
+            this.scene3d.focusOnTerritory(c.territoryId!);
+          });
+        }
         this.cardsListEl.appendChild(chip);
       }
     }

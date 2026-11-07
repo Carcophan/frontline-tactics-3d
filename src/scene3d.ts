@@ -4,6 +4,7 @@ import { DiceRollResult } from './combatMath';
 import { GameState } from './gameState';
 import {
   CONTINENTS,
+  ContinentId,
   isMaritimeConnection,
   isWrapAroundConnection,
   offsetPolygon,
@@ -12,6 +13,9 @@ import {
   TerritoryDef,
 } from './mapData';
 import { sound } from './sound';
+import { createTacticalTextures, TacticalTextureSet } from './textures';
+
+export type MapLensMode = 'FACTIONS' | 'CONTINENTS' | 'HEATMAP';
 
 interface TerritoryMeshData {
   id: string;
@@ -22,6 +26,8 @@ interface TerritoryMeshData {
   borderLine: THREE.LineSegments;
   armyGroup: THREE.Group;
   ringMesh: THREE.Mesh;
+  beaconMesh: THREE.Mesh;
+  capitalCrownGroup: THREE.Group;
   baseY: number;
   targetY: number;
   currentColor: THREE.Color;
@@ -37,6 +43,7 @@ interface ActiveProjectile {
   progress: number;
   speed: number;
   color: number;
+  trailTimer: number;
   onHit?: () => void;
 }
 
@@ -45,6 +52,14 @@ interface ActiveParticle {
   vel: THREE.Vector3;
   life: number;
   maxLife: number;
+  gravity: number;
+}
+
+interface ActiveLightFlash {
+  light: THREE.PointLight;
+  life: number;
+  maxLife: number;
+  startIntensity: number;
 }
 
 interface ActiveShockwave {
@@ -82,6 +97,13 @@ export class Scene3D {
   private mouse = new THREE.Vector2();
 
   private oceanMesh!: THREE.Mesh;
+  private oceanUniforms!: {
+    uTime: { value: number };
+    uAccentColor: { value: THREE.Color };
+  };
+  private textures!: TacticalTextureSet;
+  private cornerBeacons: THREE.MeshStandardMaterial[] = [];
+
   private mapRootGroup = new THREE.Group();
   private territoryMeshes: Record<string, TerritoryMeshData> = {};
   private labelElements: Record<
@@ -90,14 +112,17 @@ export class Scene3D {
   > = {};
 
   private hoveredTerritoryId: string | null = null;
-  private selectedTerritoryId: string | null = null;
   private highlightedTargets = new Set<string>();
+  private highlightedContinent: ContinentId | null = null;
+  public mapLens: MapLensMode = 'FACTIONS';
+
   private onTerritoryClick: (territoryId: string) => void;
   private onTerritoryHover: (territoryId: string | null) => void;
 
   // Dynamic 3D animation entities
   private projectiles: ActiveProjectile[] = [];
   private particles: ActiveParticle[] = [];
+  private lightFlashes: ActiveLightFlash[] = [];
   private shockwaves: ActiveShockwave[] = [];
   private activeDice: ActiveDice[] = [];
   private marchingUnits: {
@@ -115,6 +140,14 @@ export class Scene3D {
   private battleArrowGroup: THREE.Group;
   private diceMaterialsCache: Record<string, THREE.MeshStandardMaterial[]> = {};
 
+  // Camera shake & smooth fly-to state
+  private shakeIntensity = 0;
+  private isTopDownView = false;
+  private cameraLerpTargetPos: THREE.Vector3 | null = null;
+  private cameraLerpLookAt: THREE.Vector3 | null = null;
+  private isGameOverCelebration = false;
+  private fireworkTimer = 0;
+
   public animationSpeed = 1.0; // 1x, 2x, 4x
   private clock = new THREE.Clock();
 
@@ -130,36 +163,50 @@ export class Scene3D {
     this.onTerritoryHover = onTerritoryHover;
 
     this.scene = new THREE.Scene();
-    this.scene.background = new THREE.Color(0x07111e);
-    this.scene.fog = new THREE.FogExp2(0x07111e, 0.0045);
+    this.scene.background = new THREE.Color(0x050d1a);
+    this.scene.fog = new THREE.FogExp2(0x050d1a, 0.0042);
 
     this.camera = new THREE.PerspectiveCamera(
       45,
       container.clientWidth / container.clientHeight,
       1,
-      300
+      320
     );
     this.camera.position.set(0, 58, 44);
 
-    this.renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
+    this.renderer = new THREE.WebGLRenderer({
+      antialias: true,
+      powerPreference: 'high-performance',
+    });
     this.renderer.setSize(container.clientWidth, container.clientHeight);
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     this.renderer.shadowMap.enabled = true;
     this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+    this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
+    this.renderer.toneMappingExposure = 1.12;
     container.appendChild(this.renderer.domElement);
 
     this.controls = new OrbitControls(this.camera, this.renderer.domElement);
     this.controls.enableDamping = true;
     this.controls.dampingFactor = 0.07;
-    this.controls.maxPolarAngle = Math.PI / 2.25;
-    this.controls.minPolarAngle = 0.25;
-    this.controls.minDistance = 22;
-    this.controls.maxDistance = 95;
+    this.controls.maxPolarAngle = Math.PI / 2.22;
+    this.controls.minPolarAngle = 0.15;
+    this.controls.minDistance = 20;
+    this.controls.maxDistance = 98;
     this.controls.target.set(0, 0, 2);
+
+    // Cancel automatic camera glide if user manually orbits
+    this.controls.addEventListener('start', () => {
+      this.cameraLerpTargetPos = null;
+      this.cameraLerpLookAt = null;
+    });
 
     this.battleArrowGroup = new THREE.Group();
     this.scene.add(this.battleArrowGroup);
     this.scene.add(this.mapRootGroup);
+
+    const maxAniso = Math.min(8, this.renderer.capabilities.getMaxAnisotropy());
+    this.textures = createTacticalTextures(maxAniso);
 
     this.setupLights();
     this.buildBoardAndOcean();
@@ -170,6 +217,42 @@ export class Scene3D {
     this.animate();
   }
 
+  public get hoveredId(): string | null {
+    return this.hoveredTerritoryId;
+  }
+
+  public setHighlightedContinent(cId: ContinentId | null): void {
+    this.highlightedContinent = cId;
+  }
+
+  public toggleCameraView(): boolean {
+    this.isTopDownView = !this.isTopDownView;
+    if (this.isTopDownView) {
+      this.cameraLerpTargetPos = new THREE.Vector3(0, 76, 4);
+      this.cameraLerpLookAt = new THREE.Vector3(0, 0, 1);
+    } else {
+      this.cameraLerpTargetPos = new THREE.Vector3(0, 58, 44);
+      this.cameraLerpLookAt = new THREE.Vector3(0, 0, 2);
+    }
+    return this.isTopDownView;
+  }
+
+  public focusOnTerritory(territoryId: string): void {
+    const tDef = TERRITORY_MAP[territoryId];
+    if (!tDef) return;
+    const [cx, cz] = tDef.center;
+    this.cameraLerpLookAt = new THREE.Vector3(cx * 0.65, 0, cz * 0.65);
+    this.cameraLerpTargetPos = new THREE.Vector3(
+      cx * 0.65,
+      this.isTopDownView ? 52 : 38,
+      cz * 0.65 + (this.isTopDownView ? 3 : 26)
+    );
+  }
+
+  public triggerCameraShake(intensity = 0.65): void {
+    this.shakeIntensity = Math.min(1.6, Math.max(this.shakeIntensity, intensity));
+  }
+
   /**
    * Rebuilds all 3D territory plateaus, shelves, maritime bridges, and HTML labels
    * when switching between the Classic World Map and a newly generated Random Map.
@@ -178,7 +261,6 @@ export class Scene3D {
     this.showBattleArrow(null, null);
     this.clearActiveDice();
 
-    // Dispose geometries and materials in mapRootGroup
     this.mapRootGroup.traverse((obj) => {
       const mesh = obj as THREE.Mesh;
       if (mesh.geometry) {
@@ -194,14 +276,12 @@ export class Scene3D {
     });
     this.mapRootGroup.clear();
 
-    // Remove old territory HTML labels
     for (const lbl of Object.values(this.labelElements)) {
       lbl.root.remove();
     }
     this.labelElements = {};
     this.territoryMeshes = {};
     this.hoveredTerritoryId = null;
-    this.selectedTerritoryId = null;
     this.highlightedTargets.clear();
 
     this.buildTerritories();
@@ -209,17 +289,17 @@ export class Scene3D {
   }
 
   private setupLights(): void {
-    const ambient = new THREE.AmbientLight(0xdbeafe, 0.75);
-    this.scene.add(ambient);
+    const hemi = new THREE.HemisphereLight(0xe0f2fe, 0x0f172a, 0.85);
+    this.scene.add(hemi);
 
-    const sun = new THREE.DirectionalLight(0xfffbeb, 1.45);
-    sun.position.set(25, 65, 35);
+    const sun = new THREE.DirectionalLight(0xfffbeb, 1.55);
+    sun.position.set(25, 68, 36);
     sun.castShadow = true;
     sun.shadow.mapSize.width = 2048;
     sun.shadow.mapSize.height = 2048;
     sun.shadow.camera.near = 10;
     sun.shadow.camera.far = 150;
-    const d = 55;
+    const d = 56;
     sun.shadow.camera.left = -d;
     sun.shadow.camera.right = d;
     sun.shadow.camera.top = d;
@@ -227,72 +307,178 @@ export class Scene3D {
     sun.shadow.bias = -0.0005;
     this.scene.add(sun);
 
-    const rimLight = new THREE.DirectionalLight(0x38bdf8, 0.45);
-    rimLight.position.set(-40, 30, -35);
+    const rimLight = new THREE.DirectionalLight(0x38bdf8, 0.55);
+    rimLight.position.set(-42, 32, -38);
     this.scene.add(rimLight);
+
+    const warmFill = new THREE.DirectionalLight(0xf59e0b, 0.25);
+    warmFill.position.set(40, 22, -30);
+    this.scene.add(warmFill);
   }
 
   private buildBoardAndOcean(): void {
-    // Ocean surface
-    const oceanGeo = new THREE.PlaneGeometry(130, 85, 64, 48);
+    // Custom GLSL Tactical Ocean Shader with animated waves, caustics & sonar radar sweep
+    const oceanGeo = new THREE.PlaneGeometry(140, 95, 128, 84);
     oceanGeo.rotateX(-Math.PI / 2);
-    const oceanMat = new THREE.MeshStandardMaterial({
-      color: 0x0c2442,
-      roughness: 0.3,
-      metalness: 0.35,
+
+    this.oceanUniforms = {
+      uTime: { value: 0 },
+      uAccentColor: { value: new THREE.Color(0x38bdf8) },
+    };
+
+    const oceanMat = new THREE.ShaderMaterial({
+      uniforms: this.oceanUniforms,
+      vertexShader: `
+        uniform float uTime;
+        varying vec3 vWorldPos;
+        varying vec2 vUv;
+        varying float vElevation;
+
+        void main() {
+          vUv = uv;
+          vec3 pos = position;
+          float w1 = sin(pos.x * 0.14 + uTime * 1.35) * cos(pos.z * 0.14 + uTime * 1.05) * 0.18;
+          float w2 = sin(pos.x * 0.32 - uTime * 1.9 + pos.z * 0.25) * 0.07;
+          pos.y += w1 + w2;
+          vElevation = pos.y;
+          vec4 worldPosition = modelMatrix * vec4(pos, 1.0);
+          vWorldPos = worldPosition.xyz;
+          gl_Position = projectionMatrix * viewMatrix * worldPosition;
+        }
+      `,
+      fragmentShader: `
+        uniform float uTime;
+        uniform vec3 uAccentColor;
+        varying vec3 vWorldPos;
+        varying vec2 vUv;
+        varying float vElevation;
+
+        void main() {
+          // Deep ocean gradient
+          float dist = length(vWorldPos.xz) * 0.015;
+          vec3 deepColor = vec3(0.025, 0.08, 0.16);
+          vec3 midColor = vec3(0.05, 0.16, 0.30);
+          vec3 crestColor = vec3(0.11, 0.34, 0.56);
+
+          vec3 col = mix(midColor, deepColor, clamp(dist, 0.0, 1.0));
+          col = mix(col, crestColor, smoothstep(-0.15, 0.24, vElevation) * 0.55);
+
+          // Subtle procedural caustic interference pattern
+          float c1 = sin(vWorldPos.x * 0.45 + uTime * 0.9) * sin(vWorldPos.z * 0.45 - uTime * 0.7);
+          float c2 = cos((vWorldPos.x - vWorldPos.z) * 0.35 + uTime * 1.1);
+          float caustics = smoothstep(0.45, 0.95, (c1 + c2) * 0.5);
+          col += vec3(0.06, 0.22, 0.38) * caustics * 0.28;
+
+          // Tactical holographic coordinate grid lines
+          vec2 grid = abs(fract(vWorldPos.xz * 0.25 - 0.5) - 0.5) / fwidth(vWorldPos.xz * 0.25);
+          float line = min(grid.x, grid.y);
+          float gridAlpha = 1.0 - min(line, 1.0);
+          col += uAccentColor * gridAlpha * 0.08 * (1.0 - clamp(dist * 0.75, 0.0, 1.0));
+
+          gl_FragColor = vec4(col, 1.0);
+        }
+      `,
     });
+
     this.oceanMesh = new THREE.Mesh(oceanGeo, oceanMat);
-    this.oceanMesh.receiveShadow = true;
+    this.oceanMesh.position.y = -0.05;
     this.scene.add(this.oceanMesh);
 
-    // Subtle tactical grid over the ocean
-    const grid = new THREE.GridHelper(120, 40, 0x1e3a5f, 0x132845);
-    grid.position.y = 0.03;
-    grid.scale.z = 0.65;
-    this.scene.add(grid);
-
-    // War Table Rim Frame
+    // War Table Rim Frame with Brushed Steel / Riveted Armor Texture & Glowing Faction Pylons
     const frameGroup = new THREE.Group();
     const frameMat = new THREE.MeshStandardMaterial({
-      color: 0x1e293b,
-      roughness: 0.4,
-      metalness: 0.6,
+      color: 0x24344d,
+      map: this.textures.frameMetalMap,
+      bumpMap: this.textures.frameMetalBumpMap,
+      bumpScale: 0.14,
+      roughness: 0.36,
+      metalness: 0.72,
     });
-    const topBar = new THREE.Mesh(new THREE.BoxGeometry(102, 2.2, 2.5), frameMat);
-    topBar.position.set(0, 0.5, -27.5);
-    const botBar = new THREE.Mesh(new THREE.BoxGeometry(102, 2.2, 2.5), frameMat);
-    botBar.position.set(0, 0.5, 29.5);
-    const leftBar = new THREE.Mesh(new THREE.BoxGeometry(2.5, 2.2, 59.5), frameMat);
-    leftBar.position.set(-49.75, 0.5, 1);
-    const rightBar = new THREE.Mesh(new THREE.BoxGeometry(2.5, 2.2, 59.5), frameMat);
-    rightBar.position.set(49.75, 0.5, 1);
+    const trimMat = new THREE.MeshStandardMaterial({
+      color: 0x38bdf8,
+      emissive: 0x0284c7,
+      emissiveIntensity: 0.6,
+      roughness: 0.2,
+      metalness: 0.8,
+    });
 
-    frameGroup.add(topBar, botBar, leftBar, rightBar);
+    const topBar = new THREE.Mesh(new THREE.BoxGeometry(102.5, 2.3, 2.6), frameMat);
+    topBar.position.set(0, 0.5, -27.5);
+    const botBar = new THREE.Mesh(new THREE.BoxGeometry(102.5, 2.3, 2.6), frameMat);
+    botBar.position.set(0, 0.5, 29.5);
+    const leftBar = new THREE.Mesh(new THREE.BoxGeometry(2.6, 2.3, 59.5), frameMat);
+    leftBar.position.set(-49.9, 0.5, 1);
+    const rightBar = new THREE.Mesh(new THREE.BoxGeometry(2.6, 2.3, 59.5), frameMat);
+    rightBar.position.set(49.9, 0.5, 1);
+
+    // Inner neon trim strips along the war table frame
+    const topTrim = new THREE.Mesh(new THREE.BoxGeometry(97, 0.15, 0.18), trimMat);
+    topTrim.position.set(0, 1.66, -26.25);
+    const botTrim = new THREE.Mesh(new THREE.BoxGeometry(97, 0.15, 0.18), trimMat);
+    botTrim.position.set(0, 1.66, 28.25);
+
+    frameGroup.add(topBar, botBar, leftBar, rightBar, topTrim, botTrim);
+
+    // 4 Corner Command Pylons with active player color beacons
+    const corners: [number, number][] = [
+      [-49.9, -27.5],
+      [49.9, -27.5],
+      [-49.9, 29.5],
+      [49.9, 29.5],
+    ];
+    this.cornerBeacons = [];
+    for (const [cx, cz] of corners) {
+      const pylon = new THREE.Mesh(
+        new THREE.CylinderGeometry(1.9, 2.2, 2.9, 8),
+        frameMat
+      );
+      pylon.position.set(cx, 0.75, cz);
+      const beaconMat = new THREE.MeshStandardMaterial({
+        color: 0x3b82f6,
+        emissive: 0x3b82f6,
+        emissiveIntensity: 0.9,
+        roughness: 0.15,
+        metalness: 0.3,
+      });
+      this.cornerBeacons.push(beaconMat);
+      const beacon = new THREE.Mesh(
+        new THREE.OctahedronGeometry(0.85, 0),
+        beaconMat
+      );
+      beacon.position.set(cx, 2.9, cz);
+      frameGroup.add(pylon, beacon);
+    }
+
     this.scene.add(frameGroup);
   }
 
   private buildTerritories(): void {
     const extrudeSettings: THREE.ExtrudeGeometryOptions = {
-      depth: 1.35,
+      depth: 1.38,
       bevelEnabled: true,
-      bevelSegments: 2,
+      bevelSegments: 3,
       steps: 1,
-      bevelSize: 0.05,
-      bevelThickness: 0.18,
+      bevelSize: 0.06,
+      bevelThickness: 0.2,
     };
 
-    // Shared materials for the continental shelf (shallow water reef) and continental bedrock base
     const shelfMat = new THREE.MeshStandardMaterial({
-      color: 0x134e6f,
-      roughness: 0.35,
-      metalness: 0.2,
+      color: 0x1a7299,
+      map: this.textures.shelfWaterMap,
+      bumpMap: this.textures.terrainBumpMap,
+      bumpScale: 0.06,
+      roughness: 0.28,
+      metalness: 0.22,
       transparent: true,
-      opacity: 0.72,
+      opacity: 0.8,
     });
     const bedrockMat = new THREE.MeshStandardMaterial({
-      color: 0x1e293b,
-      roughness: 0.7,
-      metalness: 0.25,
+      color: 0x26354a,
+      map: this.textures.bedrockMap,
+      bumpMap: this.textures.bedrockBumpMap,
+      bumpScale: 0.18,
+      roughness: 0.68,
+      metalness: 0.28,
     });
 
     const shelfExtrude: THREE.ExtrudeGeometryOptions = {
@@ -300,12 +486,12 @@ export class Scene3D {
       bevelEnabled: true,
       bevelSegments: 1,
       steps: 1,
-      bevelSize: 0.18,
+      bevelSize: 0.2,
       bevelThickness: 0.04,
     };
 
     const bedrockExtrude: THREE.ExtrudeGeometryOptions = {
-      depth: 0.32,
+      depth: 0.34,
       bevelEnabled: true,
       bevelSegments: 1,
       steps: 1,
@@ -319,7 +505,6 @@ export class Scene3D {
     const polyToShape = (pts: [number, number][]): THREE.Shape => {
       const s = new THREE.Shape();
       pts.forEach(([px, pz], idx) => {
-        // Shape is in XY plane; rotateX(-Math.PI / 2) maps +Y to -Z, so -pz maps to +Z
         if (idx === 0) s.moveTo(px, -pz);
         else s.lineTo(px, -pz);
       });
@@ -330,29 +515,29 @@ export class Scene3D {
     for (const tDef of TERRITORIES) {
       const rawPolys = [tDef.polygon, ...(tDef.islands ?? [])];
 
-      // 1. Shallow coastal water shelf around continents & islands
+      // 1. Shallow coastal water shelf
       const shelfShapes = rawPolys.map((p, idx) =>
-        polyToShape(offsetPolygon(p, idx === 0 ? -0.42 : -0.28))
+        polyToShape(offsetPolygon(p, idx === 0 ? -0.44 : -0.28))
       );
       const shelfGeo = new THREE.ExtrudeGeometry(shelfShapes, shelfExtrude);
       shelfGeo.rotateX(-Math.PI / 2);
       const shelfMesh = new THREE.Mesh(shelfGeo, shelfMat);
-      shelfMesh.position.y = 0.02;
+      shelfMesh.position.y = 0.03;
       shelfMesh.receiveShadow = true;
       shelfGroup.add(shelfMesh);
 
-      // 2. Continental bedrock layer that fuses contiguous land territories into seamless continents
+      // 2. Continental bedrock layer
       const bedrockShapes = rawPolys.map((p, idx) =>
         polyToShape(offsetPolygon(p, idx === 0 ? -0.06 : -0.02))
       );
       const bedrockGeo = new THREE.ExtrudeGeometry(bedrockShapes, bedrockExtrude);
       bedrockGeo.rotateX(-Math.PI / 2);
       const bedrockMesh = new THREE.Mesh(bedrockGeo, bedrockMat);
-      bedrockMesh.position.y = 0.06;
+      bedrockMesh.position.y = 0.07;
       bedrockMesh.receiveShadow = true;
       shelfGroup.add(bedrockMesh);
 
-      // 3. Elevated Territory Plateau + Islands with crisp border inset
+      // 3. Elevated Territory Plateau + Islands
       const territoryPolys = rawPolys.map((p, idx) =>
         offsetPolygon(p, idx === 0 ? 0.07 : 0.03)
       );
@@ -364,8 +549,11 @@ export class Scene3D {
       const contColor = new THREE.Color(CONTINENTS[tDef.continent].baseColor);
       const mat = new THREE.MeshStandardMaterial({
         color: contColor,
-        roughness: 0.46,
-        metalness: 0.16,
+        map: this.textures.terrainColorMap,
+        bumpMap: this.textures.terrainBumpMap,
+        bumpScale: 0.16,
+        roughness: 0.45,
+        metalness: 0.18,
       });
 
       const mesh = new THREE.Mesh(geo, mat);
@@ -373,12 +561,12 @@ export class Scene3D {
       mesh.receiveShadow = true;
       mesh.userData = { territoryId: tDef.id };
 
-      // Crisp 3D edge outline + explicit top plateau border loop
+      // Crisp 3D edge outline + top plateau border loop
       const edgesGeo = new THREE.EdgesGeometry(geo, 28);
       const lineMat = new THREE.LineBasicMaterial({
         color: 0x0f172a,
         transparent: true,
-        opacity: 0.72,
+        opacity: 0.75,
       });
       const borderLine = new THREE.LineSegments(edgesGeo, lineMat);
       mesh.add(borderLine);
@@ -386,19 +574,19 @@ export class Scene3D {
       const topLoopMat = new THREE.LineBasicMaterial({
         color: 0x090d16,
         transparent: true,
-        opacity: 0.85,
+        opacity: 0.88,
       });
       for (const polyPts of territoryPolys) {
         const loopPts = polyPts.map(
-          ([px, pz]) => new THREE.Vector3(px, 1.54, pz)
+          ([px, pz]) => new THREE.Vector3(px, 1.59, pz)
         );
         const loopGeo = new THREE.BufferGeometry().setFromPoints(loopPts);
         const loop = new THREE.LineLoop(loopGeo, topLoopMat);
         mesh.add(loop);
       }
 
-      // Tactical highlight ring on top of territory center
-      const ringGeo = new THREE.RingGeometry(1.15, 1.58, 32);
+      // Clean solid highlight ring on top of territory center
+      const ringGeo = new THREE.RingGeometry(1.15, 1.55, 32);
       ringGeo.rotateX(-Math.PI / 2);
       const ringMat = new THREE.MeshBasicMaterial({
         color: 0xfacc15,
@@ -407,15 +595,35 @@ export class Scene3D {
         opacity: 0.0,
       });
       const ringMesh = new THREE.Mesh(ringGeo, ringMat);
-      ringMesh.position.set(tDef.center[0], 1.58, tDef.center[1]);
+      ringMesh.position.set(tDef.center[0], 1.62, tDef.center[1]);
+
+      // Holographic vertical command beacon cylinder for selected territory
+      const beaconGeo = new THREE.CylinderGeometry(1.1, 1.45, 7.5, 24, 1, true);
+      const beaconMat = new THREE.MeshBasicMaterial({
+        color: 0x38bdf8,
+        transparent: true,
+        opacity: 0.0,
+        side: THREE.DoubleSide,
+        blending: THREE.AdditiveBlending,
+        depthWrite: false,
+      });
+      const beaconMesh = new THREE.Mesh(beaconGeo, beaconMat);
+      beaconMesh.position.set(tDef.center[0], 5.3, tDef.center[1]);
+
+      // 3D Golden Capital Citadel / Crown (visible in CAPITALS mode)
+      const capitalCrownGroup = this.createCapitalCitadelMesh();
+      capitalCrownGroup.position.set(tDef.center[0], 1.6, tDef.center[1]);
+      capitalCrownGroup.visible = false;
 
       // Group for 3D Army figurines standing on this territory
       const armyGroup = new THREE.Group();
-      armyGroup.position.set(tDef.center[0], 1.55, tDef.center[1]);
+      armyGroup.position.set(tDef.center[0], 1.58, tDef.center[1]);
 
       const group = new THREE.Group();
       group.add(mesh);
       group.add(ringMesh);
+      group.add(beaconMesh);
+      group.add(capitalCrownGroup);
       group.add(armyGroup);
       this.mapRootGroup.add(group);
 
@@ -428,6 +636,8 @@ export class Scene3D {
         borderLine,
         armyGroup,
         ringMesh,
+        beaconMesh,
+        capitalCrownGroup,
         baseY: 0,
         targetY: 0,
         currentColor: contColor.clone(),
@@ -457,10 +667,33 @@ export class Scene3D {
     }
   }
 
-  /**
-   * Samples perimeter points along a territory's main polygon and islands to find
-   * the closest coastal points for maritime sea-lane bridges.
-   */
+  private createCapitalCitadelMesh(): THREE.Group {
+    const g = new THREE.Group();
+    const goldMat = new THREE.MeshStandardMaterial({
+      color: 0xfbbf24,
+      emissive: 0xd97706,
+      emissiveIntensity: 0.45,
+      roughness: 0.2,
+      metalness: 0.85,
+    });
+    const baseRing = new THREE.Mesh(
+      new THREE.TorusGeometry(1.38, 0.09, 10, 28),
+      goldMat
+    );
+    baseRing.rotation.x = Math.PI / 2;
+    baseRing.position.y = 0.08;
+
+    const crystal = new THREE.Mesh(
+      new THREE.OctahedronGeometry(0.38, 0),
+      goldMat
+    );
+    crystal.position.y = 2.15;
+    crystal.name = 'capitalCrystal';
+
+    g.add(baseRing, crystal);
+    return g;
+  }
+
   private getCoastalSamplePoints(tDef: TerritoryDef): [number, number][] {
     const polys = [tDef.polygon, ...(tDef.islands ?? [])];
     const samples: [number, number][] = [];
@@ -478,10 +711,6 @@ export class Scene3D {
     return samples;
   }
 
-  /**
-   * Builds nautical sea-lane dotted bridges across maritime/strait crossings.
-   * Contiguous land territories meet along shared borders and don't need cluttering lines.
-   */
   private buildConnectionBridges(): void {
     const drawnPairs = new Set<string>();
     const lineMat = new THREE.LineDashedMaterial({
@@ -489,15 +718,15 @@ export class Scene3D {
       dashSize: 0.55,
       gapSize: 0.35,
       transparent: true,
-      opacity: 0.75,
+      opacity: 0.78,
     });
-    const portGeo = new THREE.RingGeometry(0.14, 0.3, 16);
+    const portGeo = new THREE.RingGeometry(0.14, 0.32, 16);
     portGeo.rotateX(-Math.PI / 2);
     const portMat = new THREE.MeshBasicMaterial({
       color: 0x7dd3fc,
       side: THREE.DoubleSide,
       transparent: true,
-      opacity: 0.85,
+      opacity: 0.88,
     });
 
     for (const tDef of TERRITORIES) {
@@ -509,7 +738,6 @@ export class Scene3D {
         if (!isMaritimeConnection(tDef.id, nId)) continue;
 
         const nDef = TERRITORY_MAP[nId];
-        // East-West wrap-around sea crossing (e.g. Alaska <-> Kamchatka or random map Pacific edge)
         if (isWrapAroundConnection(tDef.id, nId)) {
           const westDef = tDef.center[0] < nDef.center[0] ? tDef : nDef;
           const eastDef = tDef.center[0] < nDef.center[0] ? nDef : tDef;
@@ -532,14 +760,13 @@ export class Scene3D {
             new THREE.Vector3(48.5, 0.65, eastPt[1])
           );
           const portW = new THREE.Mesh(portGeo, portMat);
-          portW.position.set(westPt[0], 1.56, westPt[1]);
+          portW.position.set(westPt[0], 1.6, westPt[1]);
           const portE = new THREE.Mesh(portGeo, portMat);
-          portE.position.set(eastPt[0], 1.56, eastPt[1]);
+          portE.position.set(eastPt[0], 1.6, eastPt[1]);
           this.mapRootGroup.add(portW, portE);
           continue;
         }
 
-        // Find closest coastal points between tDef and nDef
         const ptsA = this.getCoastalSamplePoints(tDef);
         const ptsB = this.getCoastalSamplePoints(nDef);
         let bestA = tDef.center;
@@ -569,11 +796,10 @@ export class Scene3D {
         line.computeLineDistances();
         this.mapRootGroup.add(line);
 
-        // Add subtle coastal port markers at both ends of the sea lane
         const port1 = new THREE.Mesh(portGeo, portMat);
-        port1.position.set(bestA[0], 1.56, bestA[1]);
+        port1.position.set(bestA[0], 1.6, bestA[1]);
         const port2 = new THREE.Mesh(portGeo, portMat);
-        port2.position.set(bestB[0], 1.56, bestB[1]);
+        port2.position.set(bestB[0], 1.6, bestB[1]);
         this.mapRootGroup.add(port1, port2);
       }
     }
@@ -591,10 +817,6 @@ export class Scene3D {
     this.mapRootGroup.add(line);
   }
 
-  /**
-   * Creates 3D miniature military units (Infantry, Cavalry Tank, Artillery Cannon)
-   * on the territory plateau representing the troop count.
-   */
   private rebuildArmyFigures(
     armyGroup: THREE.Group,
     troops: number,
@@ -607,17 +829,22 @@ export class Scene3D {
 
     const unitMat = new THREE.MeshStandardMaterial({
       color: colorHex,
-      roughness: 0.3,
-      metalness: 0.45,
-      emissive: new THREE.Color(colorHex).multiplyScalar(0.15),
+      map: this.textures.unitArmorMap,
+      bumpMap: this.textures.unitArmorBumpMap,
+      bumpScale: 0.08,
+      roughness: 0.28,
+      metalness: 0.55,
+      emissive: new THREE.Color(colorHex).multiplyScalar(0.18),
     });
     const darkMat = new THREE.MeshStandardMaterial({
-      color: 0x1e293b,
-      roughness: 0.5,
-      metalness: 0.6,
+      color: 0x26354a,
+      map: this.textures.bedrockMap,
+      bumpMap: this.textures.bedrockBumpMap,
+      bumpScale: 0.08,
+      roughness: 0.45,
+      metalness: 0.68,
     });
 
-    // Decompose troop count into visual miniatures (max ~7 figures so it looks neat)
     let rem = troops;
     const units: ('cannon' | 'tank' | 'soldier')[] = [];
     while (rem >= 10 && units.length < 4) {
@@ -655,7 +882,6 @@ export class Scene3D {
     const g = new THREE.Group();
 
     if (uType === 'soldier') {
-      // Base pedestal + body cone + helmet sphere
       const base = new THREE.Mesh(
         new THREE.CylinderGeometry(0.32, 0.38, 0.14, 12),
         darkMat
@@ -673,7 +899,6 @@ export class Scene3D {
       head.position.y = 0.82;
       g.add(base, body, head);
     } else if (uType === 'tank') {
-      // Armored hull + turret + barrel (represents 5 troops)
       const hull = new THREE.Mesh(
         new THREE.BoxGeometry(0.75, 0.3, 0.52),
         unitMat
@@ -692,7 +917,6 @@ export class Scene3D {
       barrel.position.set(0.32, 0.42, 0);
       g.add(hull, turret, barrel);
     } else {
-      // Heavy Artillery / Star Citadel (represents 10 troops)
       const base = new THREE.Mesh(
         new THREE.CylinderGeometry(0.48, 0.56, 0.25, 8),
         darkMat
@@ -716,15 +940,33 @@ export class Scene3D {
   }
 
   /**
-   * Synchronizes the 3D board colors, troop miniatures, and floating labels with GameState.
+   * Synchronizes the 3D board colors, troop miniatures, beacons, and floating labels with GameState.
    */
   public syncWithGameState(
     state: GameState,
     selectedId: string | null,
     validTargets: string[]
   ): void {
-    this.selectedTerritoryId = selectedId;
     this.highlightedTargets = new Set(validTargets);
+    this.isGameOverCelebration = state.phase === 'GAME_OVER';
+
+    // Sync War Table corner beacons & ocean radar tint with current player
+    const activePlayer = state.currentPlayer;
+    if (activePlayer) {
+      for (const bm of this.cornerBeacons) {
+        bm.color.setHex(activePlayer.colorHex);
+        bm.emissive.setHex(activePlayer.colorHex);
+      }
+      this.oceanUniforms.uAccentColor.value
+        .setHex(activePlayer.colorHex)
+        .lerp(new THREE.Color(0x38bdf8), 0.55);
+    }
+
+    // Calculate max troops for Heatmap lens normalization
+    let maxTroopsOnMap = 8;
+    for (const t of Object.values(state.territories)) {
+      if (t.troops > maxTroopsOnMap) maxTroopsOnMap = t.troops;
+    }
 
     for (const tDef of TERRITORIES) {
       const tState = state.territories[tDef.id];
@@ -733,48 +975,94 @@ export class Scene3D {
       const player = isUnclaimed ? null : state.players[tState.ownerId];
 
       const cColor = new THREE.Color(CONTINENTS[tDef.continent].baseColor);
-      if (isUnclaimed || !player) {
-        // Unclaimed territory: blend neutral slate with continent color so continent regions remain recognizable
-        const neutralColor = new THREE.Color(0x283548);
-        tm.targetColor.copy(neutralColor).lerp(cColor, 0.45);
+
+      if (this.mapLens === 'CONTINENTS') {
+        tm.targetColor.copy(cColor);
+        if (player) {
+          tm.targetColor.lerp(new THREE.Color(player.colorHex), 0.22);
+        }
+      } else if (this.mapLens === 'HEATMAP') {
+        // Cool blue -> amber -> fiery red based on troop garrison & enemy border pressure
+        const ratio = Math.min(1, tState.troops / Math.max(6, maxTroopsOnMap));
+        const heatColor = new THREE.Color(0x1e3a8a);
+        if (ratio < 0.5) {
+          heatColor.lerp(new THREE.Color(0xf59e0b), ratio * 2);
+        } else {
+          heatColor
+            .setHex(0xf59e0b)
+            .lerp(new THREE.Color(0xef4444), (ratio - 0.5) * 2);
+        }
+        tm.targetColor.copy(heatColor);
       } else {
-        // Blend player faction color (78%) with continent color (22%) for tactical clarity
-        const pColor = new THREE.Color(player.colorHex);
-        tm.targetColor.copy(pColor).lerp(cColor, 0.22);
+        // Default FACTIONS view
+        if (isUnclaimed || !player) {
+          const neutralColor = new THREE.Color(0x283548);
+          tm.targetColor.copy(neutralColor).lerp(cColor, 0.45);
+        } else {
+          const pColor = new THREE.Color(player.colorHex);
+          tm.targetColor.copy(pColor).lerp(cColor, 0.22);
+        }
       }
 
       const isSelected = selectedId === tDef.id;
       const isTarget = this.highlightedTargets.has(tDef.id);
       const isHovered = this.hoveredTerritoryId === tDef.id;
+      const isContinentHighlighted =
+        this.highlightedContinent !== null &&
+        tDef.continent === this.highlightedContinent;
 
       if (isSelected && player) {
-        tm.targetY = 0.75;
-        tm.material.emissive.setHex(player.colorHex).multiplyScalar(0.35);
+        tm.targetY = 0.82;
+        tm.material.emissive.setHex(player.colorHex).multiplyScalar(0.38);
+      } else if (isContinentHighlighted) {
+        tm.targetY = 0.62;
+        tm.material.emissive
+          .setHex(CONTINENTS[tDef.continent].baseColor)
+          .multiplyScalar(0.45);
       } else if (isTarget) {
-        tm.targetY = isHovered ? 0.55 : isUnclaimed ? 0.15 : 0.3;
+        tm.targetY = isHovered ? 0.58 : isUnclaimed ? 0.16 : 0.32;
         tm.material.emissive
           .setHex(isUnclaimed ? 0x38bdf8 : 0xfacc15)
-          .multiplyScalar(isHovered ? 0.38 : 0.15);
+          .multiplyScalar(isHovered ? 0.4 : 0.16);
       } else if (isHovered) {
-        tm.targetY = 0.35;
-        tm.material.emissive.setHex(0xffffff).multiplyScalar(0.12);
+        tm.targetY = 0.38;
+        tm.material.emissive.setHex(0xffffff).multiplyScalar(0.14);
       } else {
         tm.targetY = 0;
         tm.material.emissive.setHex(0x000000);
       }
 
-      // Update tactical ring
+      // Holographic Command Beacon on selected territory
+      const beaconMat = tm.beaconMesh.material as THREE.MeshBasicMaterial;
+      if (isSelected && player) {
+        beaconMat.color.setHex(player.colorHex);
+        beaconMat.opacity = 0.24;
+      } else if (isHovered && isTarget) {
+        beaconMat.color.setHex(0xfacc15);
+        beaconMat.opacity = 0.16;
+      } else {
+        beaconMat.opacity = 0.0;
+      }
+
+      // Update tactical ring & 3D Capital Crown
       const isCapital = state.isCapitalTerritory(tDef.id);
+      tm.capitalCrownGroup.visible = isCapital;
+
       const ringMat = tm.ringMesh.material as THREE.MeshBasicMaterial;
+      const isSetupPhase =
+        state.phase === 'SETUP_CLAIM' || state.phase === 'SETUP_DEPLOY';
       if (isSelected) {
         ringMat.color.setHex(0xffffff);
         ringMat.opacity = 0.9;
-      } else if (isTarget) {
+      } else if (isTarget && (!isSetupPhase || isHovered)) {
         ringMat.color.setHex(isUnclaimed ? 0x38bdf8 : 0xfacc15);
-        ringMat.opacity = isUnclaimed ? (isHovered ? 0.9 : 0.45) : 0.85;
+        ringMat.opacity = 0.85;
+      } else if (isContinentHighlighted) {
+        ringMat.color.setHex(0xffffff);
+        ringMat.opacity = 0.75;
       } else if (isCapital) {
         ringMat.color.setHex(0xfbbf24);
-        ringMat.opacity = 0.72;
+        ringMat.opacity = 0.78;
       } else {
         ringMat.opacity = 0.0;
       }
@@ -816,7 +1104,7 @@ export class Scene3D {
   }
 
   /**
-   * Draws a glowing 3D attack arc between two territories during battle or selection.
+   * Draws a glowing 3D attack arc with animated energy pulses between two territories.
    */
   public showBattleArrow(fromId: string | null, toId: string | null): void {
     while (this.battleArrowGroup.children.length > 0) {
@@ -833,27 +1121,29 @@ export class Scene3D {
     mid.y = p1.distanceTo(p2) > 40 ? 12.0 : 6.5;
 
     const curve = new THREE.QuadraticBezierCurve3(p1, mid, p2);
-    const tubeGeo = new THREE.TubeGeometry(curve, 24, 0.22, 8, false);
+
+    const tubeGeo = new THREE.TubeGeometry(curve, 28, 0.2, 8, false);
     const tubeMat = new THREE.MeshBasicMaterial({
       color: 0xef4444,
       transparent: true,
-      opacity: 0.85,
+      opacity: 0.82,
     });
     const tube = new THREE.Mesh(tubeGeo, tubeMat);
     this.battleArrowGroup.add(tube);
 
     // Arrowhead cone at p2
     const dir = new THREE.Vector3().subVectors(p2, mid).normalize();
-    const coneGeo = new THREE.ConeGeometry(0.6, 1.4, 12);
+    const coneGeo = new THREE.ConeGeometry(0.65, 1.5, 12);
     coneGeo.rotateX(Math.PI / 2);
-    const cone = new THREE.Mesh(coneGeo, tubeMat);
+    const coneMat = new THREE.MeshBasicMaterial({ color: 0xfacc15 });
+    const cone = new THREE.Mesh(coneGeo, coneMat);
     cone.position.copy(p2);
     cone.lookAt(p2.clone().add(dir));
     this.battleArrowGroup.add(cone);
   }
 
   /**
-   * Animates 3D troops marching along a path of territories (for reinforcement, conquest move, or fortification).
+   * Animates 3D troops marching along a path of territories.
    */
   public animateTroopMovement(
     pathIds: string[],
@@ -873,7 +1163,6 @@ export class Scene3D {
       const p1 = new THREE.Vector3(c1[0], 2.0, c1[1]);
       const p2 = new THREE.Vector3(c2[0], 2.0, c2[1]);
 
-      // Handle Alaska-Kamchatka wrap cleanly by high arc
       const mid = p1.clone().add(p2).multiplyScalar(0.5);
       mid.y = p1.distanceTo(p2) > 40 ? 12.0 : 4.8;
 
@@ -885,21 +1174,29 @@ export class Scene3D {
 
     const unitMat = new THREE.MeshStandardMaterial({
       color: colorHex,
-      emissive: new THREE.Color(colorHex).multiplyScalar(0.4),
-      roughness: 0.2,
+      map: this.textures.unitArmorMap,
+      bumpMap: this.textures.unitArmorBumpMap,
+      bumpScale: 0.08,
+      emissive: new THREE.Color(colorHex).multiplyScalar(0.45),
+      roughness: 0.22,
+      metalness: 0.5,
     });
-    const darkMat = new THREE.MeshStandardMaterial({ color: 0x0f172a });
+    const darkMat = new THREE.MeshStandardMaterial({
+      color: 0x1e293b,
+      map: this.textures.bedrockMap,
+      bumpMap: this.textures.bedrockBumpMap,
+      bumpScale: 0.08,
+    });
 
     const group = new THREE.Group();
     const uType =
       troopCount >= 8 ? 'cannon' : troopCount >= 4 ? 'tank' : 'soldier';
     const fig = this.createUnitMiniature(uType, unitMat, darkMat);
-    fig.scale.setScalar(1.35);
+    fig.scale.setScalar(1.38);
     group.add(fig);
 
-    // Glowing base ring under moving squad
     const glowRing = new THREE.Mesh(
-      new THREE.RingGeometry(0.45, 0.75, 20),
+      new THREE.RingGeometry(0.45, 0.78, 20),
       new THREE.MeshBasicMaterial({
         color: 0xffffff,
         side: THREE.DoubleSide,
@@ -932,7 +1229,7 @@ export class Scene3D {
   }
 
   /**
-   * Animates a full 3D combat dice roll + artillery exchange + explosions & casualty popups!
+   * Animates a full 3D combat dice roll + artillery exchange + explosions, light flashes & camera shake!
    */
   public animateCombatExchange(
     fromId: string,
@@ -973,16 +1270,19 @@ export class Scene3D {
       this.spawn3DDie(val, false, startPos, targetPos);
     });
 
-    // 2. Fire 3D projectiles between attacker and defender
+    // 2. Fire 3D projectiles with smoke trails & muzzle flashes
     const pFrom = new THREE.Vector3(fromCenter[0], 2.2, fromCenter[1]);
     const pTo = new THREE.Vector3(toCenter[0], 2.2, toCenter[1]);
 
-    // Attacker fires at defender
+    this.spawnLightFlash(pFrom.x, 3.2, pFrom.z, 0xfef08a, 4.5, 0.18);
+
     this.spawnProjectile(pFrom, pTo, attackerColor, () => {
       if (roll.defenderLosses > 0) {
         sound.playExplosion(roll.defenderLosses);
+        this.triggerCameraShake(0.32 * roll.defenderLosses);
+        this.spawnLightFlash(pTo.x, 3.8, pTo.z, 0xff6b35, 8.0, 0.35);
         this.spawnExplosion(pTo.x, pTo.z, 0xff6b35);
-        this.spawnShockwave(pTo.x, pTo.z, attackerColor, 3.0);
+        this.spawnShockwave(pTo.x, pTo.z, attackerColor, 3.2);
         this.addFloatingPopup(
           new THREE.Vector3(pTo.x, 3.8, pTo.z),
           `-${roll.defenderLosses}`,
@@ -991,12 +1291,13 @@ export class Scene3D {
       }
     });
 
-    // Defender fires counter-salvo
     this.spawnProjectile(pTo, pFrom, defenderColor, () => {
       if (roll.attackerLosses > 0) {
         sound.playExplosion(roll.attackerLosses);
+        this.triggerCameraShake(0.32 * roll.attackerLosses);
+        this.spawnLightFlash(pFrom.x, 3.8, pFrom.z, 0x38bdf8, 8.0, 0.35);
         this.spawnExplosion(pFrom.x, pFrom.z, 0x38bdf8);
-        this.spawnShockwave(pFrom.x, pFrom.z, defenderColor, 3.0);
+        this.spawnShockwave(pFrom.x, pFrom.z, defenderColor, 3.2);
         this.addFloatingPopup(
           new THREE.Vector3(pFrom.x, 3.8, pFrom.z),
           `-${roll.attackerLosses}`,
@@ -1015,13 +1316,34 @@ export class Scene3D {
   public triggerCaptureCelebration(territoryId: string, colorHex: number): void {
     const c = TERRITORY_MAP[territoryId].center;
     sound.playCapture();
-    this.spawnShockwave(c[0], c[1], colorHex, 4.5);
-    this.spawnExplosion(c[0], c[1], colorHex);
+    this.triggerCameraShake(0.75);
+    this.spawnLightFlash(c[0], 4.5, c[1], colorHex, 12.0, 0.55);
+    this.spawnShockwave(c[0], c[1], colorHex, 5.2);
+    this.spawnExplosion(c[0], c[1], colorHex, 28);
     this.addFloatingPopup(
       new THREE.Vector3(c[0], 4.5, c[1]),
-      'EROBERT!',
+      '⚡ EROBERT!',
       '#facc15'
     );
+  }
+
+  private spawnLightFlash(
+    x: number,
+    y: number,
+    z: number,
+    colorHex: number,
+    intensity: number,
+    maxLife: number
+  ): void {
+    const light = new THREE.PointLight(colorHex, intensity, 22);
+    light.position.set(x, y, z);
+    this.scene.add(light);
+    this.lightFlashes.push({
+      light,
+      life: 0,
+      maxLife,
+      startIntensity: intensity,
+    });
   }
 
   private spawn3DDie(
@@ -1041,7 +1363,6 @@ export class Scene3D {
       Math.random() * Math.PI * 4
     );
 
-    // Orient top face (+Y, material index 2 in BoxGeometry) to show `value`
     const targetRot = this.getRotationForDieTopValue(value);
     this.scene.add(mesh);
     this.activeDice.push({
@@ -1057,9 +1378,7 @@ export class Scene3D {
     const key = isAttacker ? 'atk' : 'def';
     if (this.diceMaterialsCache[key]) return this.diceMaterialsCache[key];
 
-    // BoxGeometry face order: 0:+X (1), 1:-X (6), 2:+Y (2), 3:-Y (5), 4:+Z (3), 5:-Z (4)
     const faceValues = [1, 6, 2, 5, 3, 4];
-    const bgColor = isAttacker ? '#dc2626' : '#2563eb';
     const borderColor = isAttacker ? '#fca5a5' : '#93c5fd';
 
     const mats = faceValues.map((v) => {
@@ -1067,13 +1386,20 @@ export class Scene3D {
       canvas.width = 128;
       canvas.height = 128;
       const ctx = canvas.getContext('2d')!;
-      ctx.fillStyle = bgColor;
+      // Textured radial gradient & brushed surface for dice
+      const grad = ctx.createRadialGradient(64, 64, 10, 64, 64, 85);
+      grad.addColorStop(0, isAttacker ? '#ef4444' : '#3b82f6');
+      grad.addColorStop(1, isAttacker ? '#991b1b' : '#1e3a8a');
+      ctx.fillStyle = grad;
       ctx.fillRect(0, 0, 128, 128);
+
       ctx.strokeStyle = borderColor;
       ctx.lineWidth = 8;
       ctx.strokeRect(4, 4, 120, 120);
+      ctx.strokeStyle = 'rgba(0, 0, 0, 0.35)';
+      ctx.lineWidth = 3;
+      ctx.strokeRect(10, 10, 108, 108);
 
-      ctx.fillStyle = '#ffffff';
       const r = 12;
       const pipCoords: Record<number, [number, number][]> = {
         1: [[64, 64]],
@@ -1110,6 +1436,13 @@ export class Scene3D {
       };
 
       for (const [px, py] of pipCoords[v]) {
+        // Recessed shadow ring
+        ctx.fillStyle = 'rgba(0, 0, 0, 0.45)';
+        ctx.beginPath();
+        ctx.arc(px + 1.5, py + 1.5, r, 0, Math.PI * 2);
+        ctx.fill();
+
+        ctx.fillStyle = '#ffffff';
         ctx.beginPath();
         ctx.arc(px, py, r, 0, Math.PI * 2);
         ctx.fill();
@@ -1118,8 +1451,10 @@ export class Scene3D {
       const tex = new THREE.CanvasTexture(canvas);
       return new THREE.MeshStandardMaterial({
         map: tex,
-        roughness: 0.25,
-        metalness: 0.1,
+        bumpMap: tex,
+        bumpScale: 0.05,
+        roughness: 0.24,
+        metalness: 0.18,
       });
     });
 
@@ -1128,7 +1463,6 @@ export class Scene3D {
   }
 
   private getRotationForDieTopValue(value: number): THREE.Euler {
-    // Face mapping: 0:+X=1, 1:-X=6, 2:+Y=2, 3:-Y=5, 4:+Z=3, 5:-Z=4
     switch (value) {
       case 1:
         return new THREE.Euler(0, 0, Math.PI / 2);
@@ -1159,7 +1493,7 @@ export class Scene3D {
     color: number,
     onHit?: () => void
   ): void {
-    const geo = new THREE.SphereGeometry(0.32, 10, 10);
+    const geo = new THREE.SphereGeometry(0.34, 12, 12);
     const mat = new THREE.MeshBasicMaterial({ color: 0xfef08a });
     const mesh = new THREE.Mesh(geo, mat);
     mesh.position.copy(start);
@@ -1172,13 +1506,18 @@ export class Scene3D {
       progress: 0,
       speed: 2.6 * this.animationSpeed,
       color,
+      trailTimer: 0,
       onHit,
     });
   }
 
-  private spawnExplosion(x: number, z: number, colorHex: number): void {
-    const count = 18;
-    const geo = new THREE.SphereGeometry(0.18, 6, 6);
+  private spawnExplosion(
+    x: number,
+    z: number,
+    colorHex: number,
+    count = 20
+  ): void {
+    const geo = new THREE.SphereGeometry(0.19, 6, 6);
     for (let i = 0; i < count; i++) {
       const mat = new THREE.MeshBasicMaterial({
         color: i % 2 === 0 ? colorHex : 0xfacc15,
@@ -1186,13 +1525,13 @@ export class Scene3D {
         opacity: 1,
       });
       const mesh = new THREE.Mesh(geo, mat);
-      mesh.position.set(x, 1.8, z);
+      mesh.position.set(x, 1.85, z);
 
       const angle = Math.random() * Math.PI * 2;
-      const speed = 2.5 + Math.random() * 5.5;
+      const speed = 2.5 + Math.random() * 6.0;
       const vel = new THREE.Vector3(
         Math.cos(angle) * speed,
-        3.5 + Math.random() * 5.0,
+        3.8 + Math.random() * 5.5,
         Math.sin(angle) * speed
       );
 
@@ -1201,7 +1540,8 @@ export class Scene3D {
         mesh,
         vel,
         life: 0,
-        maxLife: 0.55,
+        maxLife: 0.6,
+        gravity: 14,
       });
     }
   }
@@ -1212,16 +1552,16 @@ export class Scene3D {
     colorHex: number,
     maxRadius: number
   ): void {
-    const geo = new THREE.RingGeometry(0.3, 0.65, 28);
+    const geo = new THREE.RingGeometry(0.3, 0.68, 32);
     geo.rotateX(-Math.PI / 2);
     const mat = new THREE.MeshBasicMaterial({
       color: colorHex,
       side: THREE.DoubleSide,
       transparent: true,
-      opacity: 0.9,
+      opacity: 0.92,
     });
     const mesh = new THREE.Mesh(geo, mat);
-    mesh.position.set(x, 1.75, z);
+    mesh.position.set(x, 1.78, z);
     this.scene.add(mesh);
     this.shockwaves.push({
       mesh,
@@ -1250,7 +1590,7 @@ export class Scene3D {
       text,
       color,
       life: 0,
-      maxLife: 1.1,
+      maxLife: 1.15,
     });
   }
 
@@ -1294,10 +1634,17 @@ export class Scene3D {
         e.clientX - pointerDownPos.x,
         e.clientY - pointerDownPos.y
       );
-      if (dist > 6) return; // Ignore camera drag
+      if (dist > 6) return;
 
       if (this.hoveredTerritoryId) {
         this.onTerritoryClick(this.hoveredTerritoryId);
+      }
+    });
+
+    // Double-click any territory to smoothly focus the camera on it
+    this.renderer.domElement.addEventListener('dblclick', () => {
+      if (this.hoveredTerritoryId) {
+        this.focusOnTerritory(this.hoveredTerritoryId);
       }
     });
   }
@@ -1307,19 +1654,57 @@ export class Scene3D {
     const dt = Math.min(0.05, this.clock.getDelta());
     const elapsed = this.clock.getElapsedTime();
 
+    // Update Ocean GLSL Shader time
+    this.oceanUniforms.uTime.value = elapsed;
+
+    // Smooth camera preset / focus glide
+    if (this.cameraLerpTargetPos && this.cameraLerpLookAt) {
+      this.camera.position.lerp(this.cameraLerpTargetPos, Math.min(1, dt * 6));
+      this.controls.target.lerp(this.cameraLerpLookAt, Math.min(1, dt * 6));
+      if (
+        this.camera.position.distanceTo(this.cameraLerpTargetPos) < 0.25 &&
+        this.controls.target.distanceTo(this.cameraLerpLookAt) < 0.25
+      ) {
+        this.cameraLerpTargetPos = null;
+        this.cameraLerpLookAt = null;
+      }
+    }
+
     this.controls.update();
 
-    // Smooth territory elevation & color transitions
+    // Apply subtle screen/camera shake during explosions
+    if (this.shakeIntensity > 0.005) {
+      this.camera.position.x += (Math.random() - 0.5) * this.shakeIntensity;
+      this.camera.position.y += (Math.random() - 0.5) * this.shakeIntensity * 0.7;
+      this.shakeIntensity *= Math.pow(0.04, dt);
+    } else {
+      this.shakeIntensity = 0;
+    }
+
+    // Celebrate victory with periodic 3D fireworks over the war table
+    if (this.isGameOverCelebration) {
+      this.fireworkTimer -= dt;
+      if (this.fireworkTimer <= 0) {
+        this.fireworkTimer = 0.65 + Math.random() * 0.6;
+        const fx = (Math.random() - 0.5) * 70;
+        const fz = (Math.random() - 0.5) * 40;
+        const colors = [0x3b82f6, 0xfacc15, 0x10b981, 0xef4444, 0xa855f7];
+        const col = colors[Math.floor(Math.random() * colors.length)];
+        this.spawnLightFlash(fx, 8, fz, col, 10, 0.45);
+        this.spawnExplosion(fx, fz, col, 24);
+        this.spawnShockwave(fx, fz, col, 4.0);
+      }
+    }
+
+    // Smooth territory elevation, color transitions & capital crystal rotation
     for (const tm of Object.values(this.territoryMeshes)) {
-      tm.group.position.y += (tm.targetY - tm.group.position.y) * Math.min(1, dt * 12);
+      tm.group.position.y +=
+        (tm.targetY - tm.group.position.y) * Math.min(1, dt * 12);
       tm.currentColor.lerp(tm.targetColor, Math.min(1, dt * 10));
       tm.material.color.copy(tm.currentColor);
 
-      if (this.highlightedTargets.has(tm.id)) {
-        const pulse = 1 + Math.sin(elapsed * 6) * 0.14;
-        tm.ringMesh.scale.set(pulse, 1, pulse);
-      } else {
-        tm.ringMesh.scale.set(1, 1, 1);
+      if (tm.capitalCrownGroup.visible) {
+        tm.capitalCrownGroup.rotation.y = elapsed * 1.4;
       }
     }
 
@@ -1346,15 +1731,15 @@ export class Scene3D {
       d.progress = Math.min(1, d.progress + dt * 3.2 * this.animationSpeed);
       const t = 1 - Math.pow(1 - d.progress, 3);
       d.mesh.position.lerpVectors(d.startPos, d.targetPos, t);
-      // Bounce arc on Y
-      d.mesh.position.y += Math.sin(d.progress * Math.PI) * 3.0 * (1 - d.progress);
+      d.mesh.position.y +=
+        Math.sin(d.progress * Math.PI) * 3.0 * (1 - d.progress);
 
       d.mesh.rotation.x += (d.targetRot.x - d.mesh.rotation.x) * 0.25;
       d.mesh.rotation.y += (d.targetRot.y - d.mesh.rotation.y) * 0.25;
       d.mesh.rotation.z += (d.targetRot.z - d.mesh.rotation.z) * 0.25;
     }
 
-    // Update projectiles
+    // Update projectiles & spawn glowing trail particles
     for (let i = this.projectiles.length - 1; i >= 0; i--) {
       const p = this.projectiles[i];
       p.progress += dt * p.speed;
@@ -1364,11 +1749,46 @@ export class Scene3D {
         this.projectiles.splice(i, 1);
       } else {
         p.mesh.position.lerpVectors(p.start, p.end, p.progress);
-        p.mesh.position.y += Math.sin(p.progress * Math.PI) * 4.2;
+        p.mesh.position.y += Math.sin(p.progress * Math.PI) * 4.4;
+
+        p.trailTimer += dt;
+        if (p.trailTimer >= 0.025) {
+          p.trailTimer = 0;
+          const trailMesh = new THREE.Mesh(
+            new THREE.SphereGeometry(0.14, 6, 6),
+            new THREE.MeshBasicMaterial({
+              color: p.color,
+              transparent: true,
+              opacity: 0.75,
+            })
+          );
+          trailMesh.position.copy(p.mesh.position);
+          this.scene.add(trailMesh);
+          this.particles.push({
+            mesh: trailMesh,
+            vel: new THREE.Vector3(0, 0.4, 0),
+            life: 0,
+            maxLife: 0.26,
+            gravity: 0,
+          });
+        }
       }
     }
 
-    // Update explosion particles
+    // Update dynamic point light flashes
+    for (let i = this.lightFlashes.length - 1; i >= 0; i--) {
+      const lf = this.lightFlashes[i];
+      lf.life += dt * this.animationSpeed;
+      if (lf.life >= lf.maxLife) {
+        this.scene.remove(lf.light);
+        lf.light.dispose();
+        this.lightFlashes.splice(i, 1);
+      } else {
+        lf.light.intensity = lf.startIntensity * (1 - lf.life / lf.maxLife);
+      }
+    }
+
+    // Update explosion & trail particles
     for (let i = this.particles.length - 1; i >= 0; i--) {
       const pt = this.particles[i];
       pt.life += dt * this.animationSpeed;
@@ -1376,7 +1796,7 @@ export class Scene3D {
         this.scene.remove(pt.mesh);
         this.particles.splice(i, 1);
       } else {
-        pt.vel.y -= 14 * dt;
+        pt.vel.y -= pt.gravity * dt;
         pt.mesh.position.addScaledVector(pt.vel, dt);
         const mat = pt.mesh.material as THREE.MeshBasicMaterial;
         mat.opacity = 1 - pt.life / pt.maxLife;
@@ -1415,7 +1835,7 @@ export class Scene3D {
 
       tempV.set(
         tDef.center[0],
-        1.75 + tm.group.position.y,
+        1.78 + tm.group.position.y,
         tDef.center[1] + 0.95
       );
       tempV.project(this.camera);
@@ -1428,7 +1848,6 @@ export class Scene3D {
       )}px, ${y.toFixed(1)}px)`;
     }
 
-    // Update floating popups
     for (let i = this.popups.length - 1; i >= 0; i--) {
       const pop = this.popups[i];
       pop.life += dt;

@@ -13,6 +13,17 @@
       <!-- Crisp 2D Projected Labels & Floating Popups -->
       <div id="label-overlay"></div>
 
+      <!-- Cinematic Turn / Event Banner -->
+      <div id="turn-banner" class="turn-banner hidden">
+        <div class="turn-banner-inner">
+          <span id="turn-banner-sub" class="turn-banner-sub">RUNDE 1</span>
+          <strong id="turn-banner-title" class="turn-banner-title">KOMMANDANT AM ZUG</strong>
+        </div>
+      </div>
+
+      <!-- Hover Territory Intel HUD Card -->
+      <div id="territory-intel-card" class="territory-intel-card glass-panel hidden"></div>
+
       <!-- Top Bar: Players & Phase Status -->
       <header id="top-hud">
         <div class="brand-block">
@@ -23,12 +34,19 @@
         <div id="players-bar"></div>
 
         <div class="top-controls">
+          <div class="speed-group" title="Kartenansicht / Taktische Linse">
+            <span>Linse:</span>
+            <button class="lens-btn active" data-lens="FACTIONS" title="Fraktionsfarben & Bündnisse">🎨 Fraktion</button>
+            <button class="lens-btn" data-lens="CONTINENTS" title="Kontinent-Regionen hervorheben">🌍 Kontinent</button>
+            <button class="lens-btn" data-lens="HEATMAP" title="Truppenstärke & Grenz-Bedrohungs-Heatmap">🔥 Heatmap</button>
+          </div>
           <div class="speed-group" title="Animationsgeschwindigkeit">
             <span>Tempo:</span>
             <button class="speed-btn active" data-speed="1">1x</button>
             <button class="speed-btn" data-speed="2">2x</button>
             <button class="speed-btn" data-speed="4">4x</button>
           </div>
+          <button id="btn-camera-view" class="hud-btn" title="Kamera zwischen 3D-Kommandoblick und Taktischer Draufsicht wechseln">🎥 3D-Blick</button>
           <button id="btn-mode-badge" class="hud-btn mode-pill" title="Aktueller Spielmodus (Klicken zum Ändern)">🌍 Weltherrschaft</button>
           <button id="btn-claim-mode" class="hud-btn" title="Neues Spiel mit Reihum-Gebietswahl starten">🚩 Reihum-Wahl</button>
           <button id="btn-random-map" class="hud-btn" title="Sofort eine neue Zufalls-Weltkarte mit fiktiven Ländern generieren">🎲 Zufallskarte</button>
